@@ -1,35 +1,29 @@
-//! Checks for usage of  `&Vec[_]` and `&String`.
-
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg, span_lint_and_then, span_lint_hir_and_then};
-use clippy_utils::source::snippet_opt;
-use clippy_utils::ty::expr_sig;
+use clippy_utils::source::SpanRangeExt;
 use clippy_utils::visitors::contains_unsafe_block;
-use clippy_utils::{get_expr_use_or_unification_node, is_lint_allowed, path_def_id, path_to_local, paths};
+use clippy_utils::{get_expr_use_or_unification_node, is_lint_allowed, path_def_id, path_to_local, std_or_core};
 use hir::LifetimeName;
-use if_chain::if_chain;
 use rustc_errors::{Applicability, MultiSpan};
-use rustc_hir::def_id::DefId;
-use rustc_hir::hir_id::HirIdMap;
-use rustc_hir::intravisit::{walk_expr, Visitor};
+use rustc_hir::hir_id::{HirId, HirIdMap};
+use rustc_hir::intravisit::{Visitor, walk_expr};
 use rustc_hir::{
-    self as hir, AnonConst, BinOpKind, BindingAnnotation, Body, Expr, ExprKind, FnRetTy, FnSig, GenericArg,
-    ImplItemKind, ItemKind, Lifetime, Mutability, Node, Param, PatKind, QPath, TraitFn, TraitItem, TraitItemKind,
-    TyKind, Unsafety,
+    self as hir, AnonConst, BinOpKind, BindingMode, Body, Expr, ExprKind, FnRetTy, FnSig, GenericArg, ImplItemKind,
+    ItemKind, Lifetime, Mutability, Node, Param, PatKind, QPath, TraitFn, TraitItem, TraitItemKind, TyKind,
 };
-use rustc_hir_analysis::hir_ty_to_ty;
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_infer::traits::{Obligation, ObligationCause};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::{self, Binder, ClauseKind, ExistentialPredicate, List, PredicateKind, Ty};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::source_map::Span;
-use rustc_span::sym;
+use rustc_session::declare_lint_pass;
 use rustc_span::symbol::Symbol;
+use rustc_span::{Span, sym};
 use rustc_target::spec::abi::Abi;
 use rustc_trait_selection::infer::InferCtxtExt as _;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt as _;
 use std::{fmt, iter};
+
+use crate::vec::is_allowed_vec_method;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -38,7 +32,7 @@ declare_clippy_lint! {
     /// with the appropriate `.to_owned()`/`to_string()` calls.
     ///
     /// ### Why is this bad?
-    /// Requiring the argument to be of the specific size
+    /// Requiring the argument to be of the specific type
     /// makes the function less useful for no benefit; slices in the form of `&[T]`
     /// or `&str` usually suffice and can be obtained from other types, too.
     ///
@@ -172,18 +166,13 @@ impl<'tcx> LateLintPass<'tcx> for Ptr {
 
             for arg in check_fn_args(
                 cx,
-                cx.tcx
-                    .fn_sig(item.owner_id)
-                    .instantiate_identity()
-                    .skip_binder()
-                    .inputs(),
+                cx.tcx.fn_sig(item.owner_id).instantiate_identity().skip_binder(),
                 sig.decl.inputs,
-                &sig.decl.output,
                 &[],
             )
             .filter(|arg| arg.mutability() == Mutability::Not)
             {
-                span_lint_hir_and_then(cx, PTR_ARG, arg.emission_id, arg.span, &arg.build_msg(), |diag| {
+                span_lint_hir_and_then(cx, PTR_ARG, arg.emission_id, arg.span, arg.build_msg(), |diag| {
                     diag.span_suggestion(
                         arg.span,
                         "change this to",
@@ -195,12 +184,12 @@ impl<'tcx> LateLintPass<'tcx> for Ptr {
         }
     }
 
-    fn check_body(&mut self, cx: &LateContext<'tcx>, body: &'tcx Body<'_>) {
+    fn check_body(&mut self, cx: &LateContext<'tcx>, body: &Body<'tcx>) {
         let hir = cx.tcx.hir();
         let mut parents = hir.parent_iter(body.value.hir_id);
         let (item_id, sig, is_trait_item) = match parents.next() {
             Some((_, Node::Item(i))) => {
-                if let ItemKind::Fn(sig, ..) = &i.kind {
+                if let ItemKind::Fn { sig, .. } = &i.kind {
                     (i.owner_id, sig, false)
                 } else {
                     return;
@@ -237,20 +226,20 @@ impl<'tcx> LateLintPass<'tcx> for Ptr {
 
         let decl = sig.decl;
         let sig = cx.tcx.fn_sig(item_id).instantiate_identity().skip_binder();
-        let lint_args: Vec<_> = check_fn_args(cx, sig.inputs(), decl.inputs, &decl.output, body.params)
+        let lint_args: Vec<_> = check_fn_args(cx, sig, decl.inputs, body.params)
             .filter(|arg| !is_trait_item || arg.mutability() == Mutability::Not)
             .collect();
         let results = check_ptr_arg_usage(cx, body, &lint_args);
 
         for (result, args) in results.iter().zip(lint_args.iter()).filter(|(r, _)| !r.skip) {
-            span_lint_hir_and_then(cx, PTR_ARG, args.emission_id, args.span, &args.build_msg(), |diag| {
+            span_lint_hir_and_then(cx, PTR_ARG, args.emission_id, args.span, args.build_msg(), |diag| {
                 diag.multipart_suggestion(
                     "change this to",
                     iter::once((args.span, format!("{}{}", args.ref_prefix, args.deref_ty.display(cx))))
                         .chain(result.replacements.iter().map(|r| {
                             (
                                 r.expr_span,
-                                format!("{}{}", snippet_opt(cx, r.self_span).unwrap(), r.replacement),
+                                format!("{}{}", r.self_span.get_source_text(cx).unwrap(), r.replacement),
                             )
                         }))
                         .collect(),
@@ -277,60 +266,46 @@ impl<'tcx> LateLintPass<'tcx> for Ptr {
 }
 
 fn check_invalid_ptr_usage<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
-    // (fn_path, arg_indices) - `arg_indices` are the `arg` positions where null would cause U.B.
-    const INVALID_NULL_PTR_USAGE_TABLE: [(&[&str], &[usize]); 13] = [
-        (&paths::SLICE_FROM_RAW_PARTS, &[0]),
-        (&paths::SLICE_FROM_RAW_PARTS_MUT, &[0]),
-        (&paths::PTR_COPY, &[0, 1]),
-        (&paths::PTR_COPY_NONOVERLAPPING, &[0, 1]),
-        (&paths::PTR_READ, &[0]),
-        (&paths::PTR_READ_UNALIGNED, &[0]),
-        (&paths::PTR_READ_VOLATILE, &[0]),
-        (&paths::PTR_REPLACE, &[0]),
-        (&paths::PTR_SLICE_FROM_RAW_PARTS, &[0]),
-        (&paths::PTR_SLICE_FROM_RAW_PARTS_MUT, &[0]),
-        (&paths::PTR_SWAP, &[0, 1]),
-        (&paths::PTR_SWAP_NONOVERLAPPING, &[0, 1]),
-        (&paths::PTR_WRITE_BYTES, &[0]),
-    ];
-    let invalid_null_ptr_usage_table_diag_items: [(Option<DefId>, &[usize]); 3] = [
-        (cx.tcx.get_diagnostic_item(sym::ptr_write), &[0]),
-        (cx.tcx.get_diagnostic_item(sym::ptr_write_unaligned), &[0]),
-        (cx.tcx.get_diagnostic_item(sym::ptr_write_volatile), &[0]),
-    ];
+    if let ExprKind::Call(fun, args) = expr.kind
+        && let ExprKind::Path(ref qpath) = fun.kind
+        && let Some(fun_def_id) = cx.qpath_res(qpath, fun.hir_id).opt_def_id()
+        && let Some(name) = cx.tcx.get_diagnostic_name(fun_def_id)
+    {
+        // TODO: `ptr_slice_from_raw_parts` and its mutable variant should probably still be linted
+        // conditionally based on how the return value is used, but not universally like the other
+        // functions since there are valid uses for null slice pointers.
+        //
+        // See: https://github.com/rust-lang/rust-clippy/pull/13452/files#r1773772034
 
-    if_chain! {
-        if let ExprKind::Call(fun, args) = expr.kind;
-        if let ExprKind::Path(ref qpath) = fun.kind;
-        if let Some(fun_def_id) = cx.qpath_res(qpath, fun.hir_id).opt_def_id();
-        let fun_def_path = cx.get_def_path(fun_def_id).into_iter().map(Symbol::to_ident_string).collect::<Vec<_>>();
-        if let Some(arg_indices) = INVALID_NULL_PTR_USAGE_TABLE
-            .iter()
-            .find_map(|&(fn_path, indices)| if fn_path == fun_def_path { Some(indices) } else { None })
-            .or_else(|| {
-                invalid_null_ptr_usage_table_diag_items
-                    .iter()
-                    .find_map(|&(def_id, indices)| {
-                        if def_id == Some(fun_def_id) {
-                            Some(indices)
-                        } else {
-                            None
-                        }
-                    })
-            });
-        then {
-            for &arg_idx in arg_indices {
-                if let Some(arg) = args.get(arg_idx).filter(|arg| is_null_path(cx, arg)) {
-                    span_lint_and_sugg(
-                        cx,
-                        INVALID_NULL_PTR_USAGE,
-                        arg.span,
-                        "pointer must be non-null",
-                        "change this to",
-                        "core::ptr::NonNull::dangling().as_ptr()".to_string(),
-                        Applicability::MachineApplicable,
-                    );
-                }
+        // `arg` positions where null would cause U.B.
+        let arg_indices: &[_] = match name {
+            sym::ptr_read
+            | sym::ptr_read_unaligned
+            | sym::ptr_read_volatile
+            | sym::ptr_replace
+            | sym::ptr_write
+            | sym::ptr_write_bytes
+            | sym::ptr_write_unaligned
+            | sym::ptr_write_volatile
+            | sym::slice_from_raw_parts
+            | sym::slice_from_raw_parts_mut => &[0],
+            sym::ptr_copy | sym::ptr_copy_nonoverlapping | sym::ptr_swap | sym::ptr_swap_nonoverlapping => &[0, 1],
+            _ => return,
+        };
+
+        for &arg_idx in arg_indices {
+            if let Some(arg) = args.get(arg_idx).filter(|arg| is_null_path(cx, arg))
+                && let Some(std_or_core) = std_or_core(cx)
+            {
+                span_lint_and_sugg(
+                    cx,
+                    INVALID_NULL_PTR_USAGE,
+                    arg.span,
+                    "pointer must be non-null",
+                    "change this to",
+                    format!("{std_or_core}::ptr::NonNull::dangling().as_ptr()"),
+                    Applicability::MachineApplicable,
+                );
             }
         }
     }
@@ -350,9 +325,8 @@ struct PtrArgReplacement {
 
 struct PtrArg<'tcx> {
     idx: usize,
-    emission_id: hir::HirId,
+    emission_id: HirId,
     span: Span,
-    ty_did: DefId,
     ty_name: Symbol,
     method_renames: &'static [(&'static str, &'static str)],
     ref_prefix: RefPrefix,
@@ -399,7 +373,7 @@ impl fmt::Display for DerefTyDisplay<'_, '_> {
             DerefTy::Path => f.write_str("Path"),
             DerefTy::Slice(hir_ty, ty) => {
                 f.write_char('[')?;
-                match hir_ty.and_then(|s| snippet_opt(self.0, s)) {
+                match hir_ty.and_then(|s| s.get_source_text(self.0)) {
                     Some(s) => f.write_str(&s)?,
                     None => ty.fmt(f)?,
                 }
@@ -440,15 +414,15 @@ impl<'tcx> DerefTy<'tcx> {
     }
 }
 
-#[expect(clippy::too_many_lines)]
 fn check_fn_args<'cx, 'tcx: 'cx>(
     cx: &'cx LateContext<'tcx>,
-    tys: &'tcx [Ty<'tcx>],
+    fn_sig: ty::FnSig<'tcx>,
     hir_tys: &'tcx [hir::Ty<'tcx>],
-    ret_ty: &'tcx FnRetTy<'tcx>,
     params: &'tcx [Param<'tcx>],
 ) -> impl Iterator<Item = PtrArg<'tcx>> + 'cx {
-    tys.iter()
+    fn_sig
+        .inputs()
+        .iter()
         .zip(hir_tys.iter())
         .enumerate()
         .filter_map(move |(i, (ty, hir_ty))| {
@@ -461,112 +435,98 @@ fn check_fn_args<'cx, 'tcx: 'cx>(
                 && let [.., name] = path.segments
                 && cx.tcx.item_name(adt.did()) == name.ident.name
             {
-                    let emission_id = params.get(i).map_or(hir_ty.hir_id, |param| param.hir_id);
-                    let (method_renames, deref_ty) = match cx.tcx.get_diagnostic_name(adt.did()) {
-                        Some(sym::Vec) => (
-                            [("clone", ".to_owned()")].as_slice(),
-                            DerefTy::Slice(
-                                name.args
-                                    .and_then(|args| args.args.first())
-                                    .and_then(|arg| if let GenericArg::Type(ty) = arg {
-                                        Some(ty.span)
-                                    } else {
-                                        None
-                                    }),
-                                args.type_at(0),
-                            ),
-                        ),
-                        _ if Some(adt.did()) == cx.tcx.lang_items().string() => (
-                            [("clone", ".to_owned()"), ("as_str", "")].as_slice(),
-                            DerefTy::Str,
-                        ),
-                        Some(sym::PathBuf) => (
-                            [("clone", ".to_path_buf()"), ("as_path", "")].as_slice(),
-                            DerefTy::Path,
-                        ),
-                        Some(sym::Cow) if mutability == Mutability::Not => {
-                            if let Some((lifetime, ty)) = name.args
-                                .and_then(|args| {
-                                    if let [GenericArg::Lifetime(lifetime), ty] = args.args {
-                                        return Some((lifetime, ty));
-                                    }
+                let emission_id = params.get(i).map_or(hir_ty.hir_id, |param| param.hir_id);
+                let (method_renames, deref_ty) = match cx.tcx.get_diagnostic_name(adt.did()) {
+                    Some(sym::Vec) => (
+                        [("clone", ".to_owned()")].as_slice(),
+                        DerefTy::Slice(
+                            name.args.and_then(|args| args.args.first()).and_then(|arg| {
+                                if let GenericArg::Type(ty) = arg {
+                                    Some(ty.span)
+                                } else {
                                     None
-                                })
-                            {
-                                if !lifetime.is_anonymous()
-                                    && let FnRetTy::Return(ret_ty) = ret_ty
-                                    && let ret_ty = hir_ty_to_ty(cx.tcx, ret_ty)
-                                    && ret_ty
-                                        .walk()
-                                        .filter_map(|arg| {
-                                            arg.as_region().and_then(|lifetime| {
-                                                match lifetime.kind() {
-                                                    ty::ReEarlyBound(r) => Some(r.def_id),
-                                                    ty::ReLateBound(_, r) => r.kind.get_id(),
-                                                    ty::ReFree(r) => r.bound_region.get_id(),
-                                                    ty::ReStatic
-                                                    | ty::ReVar(_)
-                                                    | ty::RePlaceholder(_)
-                                                    | ty::ReErased
-                                                    | ty::ReError(_) => None,
-                                                }
-                                            })
-                                        })
-                                        .any(|def_id| {
-                                            matches!(
-                                                lifetime.res,
-                                                LifetimeName::Param(param_def_id) if def_id
-                                                    .as_local()
-                                                    .is_some_and(|def_id| def_id == param_def_id),
-                                            )
-                                        })
-                                {
-                                    // `&Cow<'a, T>` when the return type uses 'a is okay
-                                    return None;
                                 }
-
-                                let ty_name =
-                                    snippet_opt(cx, ty.span()).unwrap_or_else(|| args.type_at(1).to_string());
-
-                                span_lint_hir_and_then(
-                                    cx,
-                                    PTR_ARG,
-                                    emission_id,
-                                    hir_ty.span,
-                                    "using a reference to `Cow` is not recommended",
-                                    |diag| {
-                                        diag.span_suggestion(
-                                            hir_ty.span,
-                                            "change this to",
-                                            format!("&{}{ty_name}", mutability.prefix_str()),
-                                            Applicability::Unspecified,
-                                        );
-                                    }
-                                );
+                            }),
+                            args.type_at(0),
+                        ),
+                    ),
+                    _ if Some(adt.did()) == cx.tcx.lang_items().string() => {
+                        ([("clone", ".to_owned()"), ("as_str", "")].as_slice(), DerefTy::Str)
+                    },
+                    Some(sym::PathBuf) => ([("clone", ".to_path_buf()"), ("as_path", "")].as_slice(), DerefTy::Path),
+                    Some(sym::Cow) if mutability == Mutability::Not => {
+                        if let Some((lifetime, ty)) = name.args.and_then(|args| {
+                            if let [GenericArg::Lifetime(lifetime), ty] = args.args {
+                                return Some((lifetime, ty));
                             }
-                            return None;
-                        },
-                        _ => return None,
-                    };
-                    return Some(PtrArg {
-                        idx: i,
-                        emission_id,
-                        span: hir_ty.span,
-                        ty_did: adt.did(),
-                        ty_name: name.ident.name,
-                        method_renames,
-                        ref_prefix: RefPrefix {
-                            lt: *lt,
-                            mutability,
-                        },
-                        deref_ty,
-                    });
+                            None
+                        }) {
+                            if let LifetimeName::Param(param_def_id) = lifetime.res
+                                && !lifetime.is_anonymous()
+                                && fn_sig
+                                    .output()
+                                    .walk()
+                                    .filter_map(|arg| {
+                                        arg.as_region().and_then(|lifetime| match lifetime.kind() {
+                                            ty::ReEarlyParam(r) => Some(
+                                                cx.tcx
+                                                    .generics_of(cx.tcx.parent(param_def_id.to_def_id()))
+                                                    .region_param(r, cx.tcx)
+                                                    .def_id,
+                                            ),
+                                            ty::ReBound(_, r) => r.kind.get_id(),
+                                            ty::ReLateParam(r) => r.kind.get_id(),
+                                            ty::ReStatic
+                                            | ty::ReVar(_)
+                                            | ty::RePlaceholder(_)
+                                            | ty::ReErased
+                                            | ty::ReError(_) => None,
+                                        })
+                                    })
+                                    .any(|def_id| def_id.as_local().is_some_and(|def_id| def_id == param_def_id))
+                            {
+                                // `&Cow<'a, T>` when the return type uses 'a is okay
+                                return None;
+                            }
+
+                            span_lint_hir_and_then(
+                                cx,
+                                PTR_ARG,
+                                emission_id,
+                                hir_ty.span,
+                                "using a reference to `Cow` is not recommended",
+                                |diag| {
+                                    diag.span_suggestion(
+                                        hir_ty.span,
+                                        "change this to",
+                                        match ty.span().get_source_text(cx) {
+                                            Some(s) => format!("&{}{s}", mutability.prefix_str()),
+                                            None => format!("&{}{}", mutability.prefix_str(), args.type_at(1)),
+                                        },
+                                        Applicability::Unspecified,
+                                    );
+                                },
+                            );
+                        }
+                        return None;
+                    },
+                    _ => return None,
+                };
+                return Some(PtrArg {
+                    idx: i,
+                    emission_id,
+                    span: hir_ty.span,
+                    ty_name: name.ident.name,
+                    method_renames,
+                    ref_prefix: RefPrefix { lt: *lt, mutability },
+                    deref_ty,
+                });
             }
             None
         })
 }
 
-fn check_mut_from_ref<'tcx>(cx: &LateContext<'tcx>, sig: &FnSig<'_>, body: Option<&'tcx Body<'_>>) {
+fn check_mut_from_ref<'tcx>(cx: &LateContext<'tcx>, sig: &FnSig<'_>, body: Option<&Body<'tcx>>) {
     if let FnRetTy::Return(ty) = sig.decl.output
         && let Some((out, Mutability::Mut, _)) = get_ref_lm(ty)
     {
@@ -581,9 +541,7 @@ fn check_mut_from_ref<'tcx>(cx: &LateContext<'tcx>, sig: &FnSig<'_>, body: Optio
             .collect();
         if let Some(args) = args
             && !args.is_empty()
-            && body.map_or(true, |body| {
-                sig.header.unsafety == Unsafety::Unsafe || contains_unsafe_block(cx, body.value)
-            })
+            && body.is_none_or(|body| sig.header.is_unsafe() || contains_unsafe_block(cx, body.value))
         {
             span_lint_and_then(
                 cx,
@@ -600,7 +558,7 @@ fn check_mut_from_ref<'tcx>(cx: &LateContext<'tcx>, sig: &FnSig<'_>, body: Optio
 }
 
 #[expect(clippy::too_many_lines)]
-fn check_ptr_arg_usage<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'_>, args: &[PtrArg<'tcx>]) -> Vec<PtrArgResult> {
+fn check_ptr_arg_usage<'tcx>(cx: &LateContext<'tcx>, body: &Body<'tcx>, args: &[PtrArg<'tcx>]) -> Vec<PtrArgResult> {
     struct V<'cx, 'tcx> {
         cx: &'cx LateContext<'tcx>,
         /// Map from a local id to which argument it came from (index into `Self::args` and
@@ -643,73 +601,58 @@ fn check_ptr_arg_usage<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'_>, args:
 
             match get_expr_use_or_unification_node(self.cx.tcx, e) {
                 Some((Node::Stmt(_), _)) => (),
-                Some((Node::Local(l), _)) => {
+                Some((Node::LetStmt(l), _)) => {
                     // Only trace simple bindings. e.g `let x = y;`
-                    if let PatKind::Binding(BindingAnnotation::NONE, id, _, None) = l.pat.kind {
+                    if let PatKind::Binding(BindingMode::NONE, id, _, None) = l.pat.kind {
                         self.bindings.insert(id, args_idx);
                     } else {
                         set_skip_flag();
                     }
                 },
-                Some((Node::Expr(e), child_id)) => match e.kind {
-                    ExprKind::Call(f, expr_args) => {
-                        let i = expr_args.iter().position(|arg| arg.hir_id == child_id).unwrap_or(0);
-                        if expr_sig(self.cx, f).and_then(|sig| sig.input(i)).map_or(true, |ty| {
-                            match *ty.skip_binder().peel_refs().kind() {
-                                ty::Dynamic(preds, _, _) => !matches_preds(self.cx, args.deref_ty.ty(self.cx), preds),
-                                ty::Param(_) => true,
-                                ty::Adt(def, _) => def.did() == args.ty_did,
-                                _ => false,
-                            }
-                        }) {
-                            // Passed to a function taking the non-dereferenced type.
-                            set_skip_flag();
-                        }
-                    },
-                    ExprKind::MethodCall(name, self_arg, expr_args, _) => {
-                        let i = std::iter::once(self_arg)
-                            .chain(expr_args.iter())
-                            .position(|arg| arg.hir_id == child_id)
-                            .unwrap_or(0);
-                        if i == 0 {
-                            // Check if the method can be renamed.
-                            let name = name.ident.as_str();
-                            if let Some((_, replacement)) = args.method_renames.iter().find(|&&(x, _)| x == name) {
-                                result.replacements.push(PtrArgReplacement {
-                                    expr_span: e.span,
-                                    self_span: self_arg.span,
-                                    replacement,
-                                });
-                                return;
-                            }
-                        }
+                Some((Node::Expr(use_expr), child_id)) => {
+                    if let ExprKind::Index(e, ..) = use_expr.kind
+                        && e.hir_id == child_id
+                    {
+                        // Indexing works with both owned and its dereferenced type
+                        return;
+                    }
 
-                        let Some(id) = self.cx.typeck_results().type_dependent_def_id(e.hir_id) else {
-                            set_skip_flag();
+                    if let ExprKind::MethodCall(name, receiver, ..) = use_expr.kind
+                        && receiver.hir_id == child_id
+                    {
+                        let name = name.ident.as_str();
+
+                        // Check if the method can be renamed.
+                        if let Some((_, replacement)) = args.method_renames.iter().find(|&&(x, _)| x == name) {
+                            result.replacements.push(PtrArgReplacement {
+                                expr_span: use_expr.span,
+                                self_span: receiver.span,
+                                replacement,
+                            });
                             return;
-                        };
-
-                        match *self.cx.tcx.fn_sig(id).instantiate_identity().skip_binder().inputs()[i]
-                            .peel_refs()
-                            .kind()
-                        {
-                            ty::Dynamic(preds, _, _) if !matches_preds(self.cx, args.deref_ty.ty(self.cx), preds) => {
-                                set_skip_flag();
-                            },
-                            ty::Param(_) => {
-                                set_skip_flag();
-                            },
-                            // If the types match check for methods which exist on both types. e.g. `Vec::len` and
-                            // `slice::len`
-                            ty::Adt(def, _) if def.did() == args.ty_did => {
-                                set_skip_flag();
-                            },
-                            _ => (),
                         }
-                    },
-                    // Indexing is fine for currently supported types.
-                    ExprKind::Index(e, _, _) if e.hir_id == child_id => (),
-                    _ => set_skip_flag(),
+
+                        // Some methods exist on both `[T]` and `Vec<T>`, such as `len`, where the receiver type
+                        // doesn't coerce to a slice and our adjusted type check below isn't enough,
+                        // but it would still be valid to call with a slice
+                        if is_allowed_vec_method(self.cx, use_expr) {
+                            return;
+                        }
+                    }
+
+                    let deref_ty = args.deref_ty.ty(self.cx);
+                    let adjusted_ty = self.cx.typeck_results().expr_ty_adjusted(e).peel_refs();
+                    if adjusted_ty == deref_ty {
+                        return;
+                    }
+
+                    if let ty::Dynamic(preds, ..) = adjusted_ty.kind()
+                        && matches_preds(self.cx, deref_ty, preds)
+                    {
+                        return;
+                    }
+
+                    set_skip_flag();
                 },
                 _ => set_skip_flag(),
             }
@@ -726,9 +669,7 @@ fn check_ptr_arg_usage<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'_>, args:
             .filter_map(|(i, arg)| {
                 let param = &body.params[arg.idx];
                 match param.pat.kind {
-                    PatKind::Binding(BindingAnnotation::NONE, id, _, None)
-                        if !is_lint_allowed(cx, PTR_ARG, param.hir_id) =>
-                    {
+                    PatKind::Binding(BindingMode::NONE, id, _, None) if !is_lint_allowed(cx, PTR_ARG, param.hir_id) => {
                         Some((id, i))
                     },
                     _ => {
@@ -752,24 +693,26 @@ fn matches_preds<'tcx>(
     ty: Ty<'tcx>,
     preds: &'tcx [ty::PolyExistentialPredicate<'tcx>],
 ) -> bool {
-    let infcx = cx.tcx.infer_ctxt().build();
-    preds.iter().all(|&p| match cx.tcx.erase_late_bound_regions(p) {
-        ExistentialPredicate::Trait(p) => infcx
-            .type_implements_trait(p.def_id, [ty.into()].into_iter().chain(p.args.iter()), cx.param_env)
-            .must_apply_modulo_regions(),
-        ExistentialPredicate::Projection(p) => infcx.predicate_must_hold_modulo_regions(&Obligation::new(
-            cx.tcx,
-            ObligationCause::dummy(),
-            cx.param_env,
-            cx.tcx
-                .mk_predicate(Binder::dummy(PredicateKind::Clause(ClauseKind::Projection(
-                    p.with_self_ty(cx.tcx, ty),
-                )))),
-        )),
-        ExistentialPredicate::AutoTrait(p) => infcx
-            .type_implements_trait(p, [ty], cx.param_env)
-            .must_apply_modulo_regions(),
-    })
+    let infcx = cx.tcx.infer_ctxt().build(cx.typing_mode());
+    preds
+        .iter()
+        .all(|&p| match cx.tcx.instantiate_bound_regions_with_erased(p) {
+            ExistentialPredicate::Trait(p) => infcx
+                .type_implements_trait(p.def_id, [ty.into()].into_iter().chain(p.args.iter()), cx.param_env)
+                .must_apply_modulo_regions(),
+            ExistentialPredicate::Projection(p) => infcx.predicate_must_hold_modulo_regions(&Obligation::new(
+                cx.tcx,
+                ObligationCause::dummy(),
+                cx.param_env,
+                cx.tcx
+                    .mk_predicate(Binder::dummy(PredicateKind::Clause(ClauseKind::Projection(
+                        p.with_self_ty(cx.tcx, ty),
+                    )))),
+            )),
+            ExistentialPredicate::AutoTrait(p) => infcx
+                .type_implements_trait(p, [ty], cx.param_env)
+                .must_apply_modulo_regions(),
+        })
 }
 
 fn get_ref_lm<'tcx>(ty: &'tcx hir::Ty<'tcx>) -> Option<(&'tcx Lifetime, Mutability, Span)> {
@@ -782,9 +725,8 @@ fn get_ref_lm<'tcx>(ty: &'tcx hir::Ty<'tcx>) -> Option<(&'tcx Lifetime, Mutabili
 
 fn is_null_path(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     if let ExprKind::Call(pathexp, []) = expr.kind {
-        path_def_id(cx, pathexp).map_or(false, |id| {
-            matches!(cx.tcx.get_diagnostic_name(id), Some(sym::ptr_null | sym::ptr_null_mut))
-        })
+        path_def_id(cx, pathexp)
+            .is_some_and(|id| matches!(cx.tcx.get_diagnostic_name(id), Some(sym::ptr_null | sym::ptr_null_mut)))
     } else {
         false
     }

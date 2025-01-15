@@ -1,21 +1,21 @@
 //
 
-// compile-flags: -C no-prepopulate-passes
+//@ compile-flags: -C no-prepopulate-passes
 
 #![crate_type = "lib"]
 
-#![feature(repr_simd, platform_intrinsics)]
+#![feature(repr_simd, intrinsics)]
 #![allow(non_camel_case_types)]
 
 #[repr(simd)]
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct Vec2<T>(pub T, pub T);
+pub struct Vec2<T>(pub [T; 2]);
 
 #[repr(simd)]
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct Vec4<T>(pub T, pub T, pub T, pub T);
+pub struct Vec4<T>(pub [T; 4]);
 
-extern "platform-intrinsic" {
+extern "rust-intrinsic" {
     fn simd_gather<T, P, M>(value: T, pointers: P, mask: M) -> T;
 }
 

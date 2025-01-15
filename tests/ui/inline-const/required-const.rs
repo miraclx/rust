@@ -1,6 +1,5 @@
-// build-fail
-// compile-flags: -Zmir-opt-level=3
-#![feature(inline_const)]
+//@ build-fail
+//@ compile-flags: -Zmir-opt-level=3
 
 fn foo<T>() {
     if false {

@@ -1,38 +1,40 @@
 //! Visitor for a run-time value with a given layout: Traverse enums, structs and other compound
 //! types until we arrive at the leaves, with custom handling for primitive types.
 
+use std::num::NonZero;
+
+use rustc_abi::{FieldIdx, FieldsShape, VariantIdx, Variants};
 use rustc_index::IndexVec;
 use rustc_middle::mir::interpret::InterpResult;
-use rustc_middle::ty;
-use rustc_target::abi::FieldIdx;
-use rustc_target::abi::{FieldsShape, VariantIdx, Variants};
+use rustc_middle::ty::layout::LayoutOf;
+use rustc_middle::ty::{self, Ty};
+use tracing::trace;
 
-use std::num::NonZeroUsize;
-
-use super::{InterpCx, MPlaceTy, Machine, Projectable};
+use super::{InterpCx, MPlaceTy, Machine, Projectable, interp_ok, throw_inval};
 
 /// How to traverse a value and what to do when we are at the leaves.
-pub trait ValueVisitor<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>>: Sized {
+pub trait ValueVisitor<'tcx, M: Machine<'tcx>>: Sized {
     type V: Projectable<'tcx, M::Provenance> + From<MPlaceTy<'tcx, M::Provenance>>;
 
     /// The visitor must have an `InterpCx` in it.
-    fn ecx(&self) -> &InterpCx<'mir, 'tcx, M>;
+    fn ecx(&self) -> &InterpCx<'tcx, M>;
 
     /// `read_discriminant` can be hooked for better error messages.
     #[inline(always)]
     fn read_discriminant(&mut self, v: &Self::V) -> InterpResult<'tcx, VariantIdx> {
-        Ok(self.ecx().read_discriminant(&v.to_op(self.ecx())?)?)
+        self.ecx().read_discriminant(&v.to_op(self.ecx())?)
     }
 
     /// This function provides the chance to reorder the order in which fields are visited for
-    /// `FieldsShape::Aggregate`: The order of fields will be
-    /// `(0..num_fields).map(aggregate_field_order)`.
+    /// `FieldsShape::Aggregate`.
     ///
-    /// The default means we iterate in source declaration order; alternative this can do an inverse
-    /// lookup in `memory_index` to use memory field order instead.
+    /// The default means we iterate in source declaration order; alternatively this can do some
+    /// work with `memory_index` to iterate in memory order.
     #[inline(always)]
-    fn aggregate_field_order(_memory_index: &IndexVec<FieldIdx, u32>, idx: usize) -> usize {
-        idx
+    fn aggregate_field_iter(
+        memory_index: &IndexVec<FieldIdx, u32>,
+    ) -> impl Iterator<Item = FieldIdx> + 'static {
+        memory_index.indices()
     }
 
     // Recursive actions, ready to be overloaded.
@@ -43,15 +45,15 @@ pub trait ValueVisitor<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>>: Sized {
     }
     /// Visits the given value as a union. No automatic recursion can happen here.
     #[inline(always)]
-    fn visit_union(&mut self, _v: &Self::V, _fields: NonZeroUsize) -> InterpResult<'tcx> {
-        Ok(())
+    fn visit_union(&mut self, _v: &Self::V, _fields: NonZero<usize>) -> InterpResult<'tcx> {
+        interp_ok(())
     }
     /// Visits the given value as the pointer of a `Box`. There is nothing to recurse into.
-    /// The type of `v` will be a raw pointer, but this is a field of `Box<T>` and the
-    /// pointee type is the actual `T`.
+    /// The type of `v` will be a raw pointer to `T`, but this is a field of `Box<T>` and the
+    /// pointee type is the actual `T`. `box_ty` provides the full type of the `Box` itself.
     #[inline(always)]
-    fn visit_box(&mut self, _v: &Self::V) -> InterpResult<'tcx> {
-        Ok(())
+    fn visit_box(&mut self, _box_ty: Ty<'tcx>, _v: &Self::V) -> InterpResult<'tcx> {
+        interp_ok(())
     }
 
     /// Called each time we recurse down to a field of a "product-like" aggregate
@@ -81,6 +83,7 @@ pub trait ValueVisitor<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>>: Sized {
         self.visit_value(new_val)
     }
 
+    /// Traversal logic; should not be overloaded.
     fn walk_value(&mut self, v: &Self::V) -> InterpResult<'tcx> {
         let ty = v.layout().ty;
         trace!("walk_value: type: {ty}");
@@ -88,23 +91,34 @@ pub trait ValueVisitor<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>>: Sized {
         // Special treatment for special types, where the (static) layout is not sufficient.
         match *ty.kind() {
             // If it is a trait object, switch to the real type that was used to create it.
-            ty::Dynamic(_, _, ty::Dyn) => {
+            ty::Dynamic(data, _, ty::Dyn) => {
                 // Dyn types. This is unsized, and the actual dynamic type of the data is given by the
                 // vtable stored in the place metadata.
                 // unsized values are never immediate, so we can assert_mem_place
                 let op = v.to_op(self.ecx())?;
                 let dest = op.assert_mem_place();
-                let inner_mplace = self.ecx().unpack_dyn_trait(&dest)?.0;
+                let inner_mplace = self.ecx().unpack_dyn_trait(&dest, data)?;
                 trace!("walk_value: dyn object layout: {:#?}", inner_mplace.layout);
                 // recurse with the inner type
-                return self.visit_field(&v, 0, &inner_mplace.into());
+                return self.visit_field(v, 0, &inner_mplace.into());
             }
-            ty::Dynamic(_, _, ty::DynStar) => {
+            ty::Dynamic(data, _, ty::DynStar) => {
                 // DynStar types. Very different from a dyn type (but strangely part of the
                 // same variant in `TyKind`): These are pairs where the 2nd component is the
                 // vtable, and the first component is the data (which must be ptr-sized).
-                let data = self.ecx().unpack_dyn_star(v)?.0;
-                return self.visit_field(&v, 0, &data);
+
+                // First make sure the vtable can be read at its type.
+                // The type of this vtable is fake, it claims to be a reference to some actual memory but that isn't true.
+                // So we transmute it to a raw pointer.
+                let raw_ptr_ty = Ty::new_mut_ptr(*self.ecx().tcx, self.ecx().tcx.types.unit);
+                let raw_ptr_ty = self.ecx().layout_of(raw_ptr_ty)?;
+                let vtable_field =
+                    self.ecx().project_field(v, 1)?.transmute(raw_ptr_ty, self.ecx())?;
+                self.visit_field(v, 1, &vtable_field)?;
+
+                // Then unpack the first field, and continue.
+                let data = self.ecx().unpack_dyn_star(v, data)?;
+                return self.visit_field(v, 0, &data);
             }
             // Slices do not need special handling here: they have `Array` field
             // placement with length 0, so we enter the `Array` case below which
@@ -144,15 +158,25 @@ pub trait ValueVisitor<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>>: Sized {
                 assert_eq!(nonnull_ptr.layout().fields.count(), 1);
                 let raw_ptr = self.ecx().project_field(&nonnull_ptr, 0)?; // the actual raw ptr
                 // ... whose only field finally is a raw ptr we can dereference.
-                self.visit_box(&raw_ptr)?;
+                self.visit_box(ty, &raw_ptr)?;
 
                 // The second `Box` field is the allocator, which we recursively check for validity
                 // like in regular structs.
                 self.visit_field(v, 1, &alloc)?;
 
                 // We visited all parts of this one.
-                return Ok(());
+                return interp_ok(());
             }
+
+            // Non-normalized types should never show up here.
+            ty::Param(..)
+            | ty::Alias(..)
+            | ty::Bound(..)
+            | ty::Placeholder(..)
+            | ty::Infer(..)
+            | ty::Error(..) => throw_inval!(TooGeneric),
+
+            // The rest is handled below.
             _ => {}
         };
 
@@ -162,9 +186,9 @@ pub trait ValueVisitor<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>>: Sized {
             &FieldsShape::Union(fields) => {
                 self.visit_union(v, fields)?;
             }
-            FieldsShape::Arbitrary { offsets, memory_index } => {
-                for idx in 0..offsets.len() {
-                    let idx = Self::aggregate_field_order(memory_index, idx);
+            FieldsShape::Arbitrary { memory_index, .. } => {
+                for idx in Self::aggregate_field_iter(memory_index) {
+                    let idx = idx.as_usize();
                     let field = self.ecx().project_field(v, idx)?;
                     self.visit_field(v, idx, &field)?;
                 }
@@ -194,10 +218,10 @@ pub trait ValueVisitor<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>>: Sized {
                 // recurse with the inner type
                 self.visit_variant(v, idx, &inner)?;
             }
-            // For single-variant layouts, we already did anything there is to do.
-            Variants::Single { .. } => {}
+            // For single-variant layouts, we already did everything there is to do.
+            Variants::Single { .. } | Variants::Empty => {}
         }
 
-        Ok(())
+        interp_ok(())
     }
 }

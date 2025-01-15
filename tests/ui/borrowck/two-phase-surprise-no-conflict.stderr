@@ -71,11 +71,12 @@ error[E0502]: cannot borrow `*reg` as mutable because it is also borrowed as imm
 LL | fn register_plugins<'a>(mk_reg: impl Fn() -> &'a mut Registry<'a>) {
    |                     -- lifetime `'a` defined here
 ...
+LL |     let reg = mk_reg();
+   |               -------- assignment requires that `reg.sess_mut` is borrowed for `'a`
 LL |     reg.register_univ(Box::new(CapturePass::new(&reg.sess_mut)));
-   |     ^^^^^^^^^^^^^^^^^^-----------------------------------------^
-   |     |                 |                         |
-   |     |                 |                         immutable borrow occurs here
-   |     |                 cast requires that `reg.sess_mut` is borrowed for `'a`
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-------------^^^
+   |     |                                           |
+   |     |                                           immutable borrow occurs here
    |     mutable borrow occurs here
 
 error[E0502]: cannot borrow `*reg` as mutable because it is also borrowed as immutable
@@ -113,11 +114,12 @@ error[E0499]: cannot borrow `*reg` as mutable more than once at a time
 LL | fn register_plugins<'a>(mk_reg: impl Fn() -> &'a mut Registry<'a>) {
    |                     -- lifetime `'a` defined here
 ...
+LL |     let reg = mk_reg();
+   |               -------- assignment requires that `reg.sess_mut` is borrowed for `'a`
 LL |     reg.register_univ(Box::new(CapturePass::new_mut(&mut reg.sess_mut)));
-   |     ^^^^^^^^^^^^^^^^^^-------------------------------------------------^
-   |     |                 |                             |
-   |     |                 |                             first mutable borrow occurs here
-   |     |                 cast requires that `reg.sess_mut` is borrowed for `'a`
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-----------------^^^
+   |     |                                               |
+   |     |                                               first mutable borrow occurs here
    |     second mutable borrow occurs here
 
 error[E0499]: cannot borrow `reg.sess_mut` as mutable more than once at a time

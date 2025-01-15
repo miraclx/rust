@@ -1,7 +1,8 @@
 //! Completion for extern crates
 
-use hir::{HasAttrs, Name};
-use ide_db::SymbolKind;
+use hir::Name;
+use ide_db::{documentation::HasDocs, SymbolKind};
+use syntax::ToSmolStr;
 
 use crate::{context::CompletionContext, CompletionItem, CompletionItemKind};
 
@@ -18,7 +19,8 @@ pub(crate) fn complete_extern_crate(acc: &mut Completions, ctx: &CompletionConte
         let mut item = CompletionItem::new(
             CompletionItemKind::SymbolKind(SymbolKind::Module),
             ctx.source_range(),
-            name.to_smol_str(),
+            name.display_no_db(ctx.edition).to_smolstr(),
+            ctx.edition,
         );
         item.set_documentation(module.docs(ctx.db));
 
@@ -46,7 +48,7 @@ mod other_mod {}
 
         let completion_list = completion_list_no_kw(case);
 
-        assert_eq!("md other_crate_a\n".to_string(), completion_list);
+        assert_eq!("md other_crate_a\n".to_owned(), completion_list);
     }
 
     #[test]
@@ -66,6 +68,6 @@ mod other_mod {}
 
         let completion_list = completion_list_no_kw(case);
 
-        assert_eq!("md other_crate_a\n".to_string(), completion_list);
+        assert_eq!("md other_crate_a\n".to_owned(), completion_list);
     }
 }

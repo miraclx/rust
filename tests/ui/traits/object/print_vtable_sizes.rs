@@ -1,5 +1,5 @@
-// check-pass
-// compile-flags: -Z print-vtable-sizes
+//@ check-pass
+//@ compile-flags: -Z print-vtable-sizes
 #![crate_type = "lib"]
 
 trait A<T: help::V>: AsRef<[T::V]> + AsMut<[T::V]> {}
@@ -7,7 +7,7 @@ trait A<T: help::V>: AsRef<[T::V]> + AsMut<[T::V]> {}
 trait B<T>: AsRef<T> + AsRef<T> + AsRef<T> + AsRef<T> {}
 
 trait C {
-    fn x() {} // not object safe, shouldn't be reported
+    fn x() {} // not dyn-compatible, shouldn't be reported
 }
 
 // This does not have any upcasting cost,

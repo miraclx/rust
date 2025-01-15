@@ -1,14 +1,17 @@
 //! A pass that checks to make sure private fields and methods aren't used
 //! outside their scopes. This pass will also generate a set of exported items
 //! which are available for use externally when compiled as a library.
-use crate::ty::{TyCtxt, Visibility};
-use rustc_data_structures::fx::FxHashMap;
+
+use std::hash::Hash;
+
+use rustc_data_structures::fx::{FxIndexMap, IndexEntry};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_hir::def::DefKind;
 use rustc_macros::HashStable;
 use rustc_query_system::ich::StableHashingContext;
-use rustc_span::def_id::{LocalDefId, CRATE_DEF_ID};
-use std::hash::Hash;
+use rustc_span::def_id::{CRATE_DEF_ID, LocalDefId};
+
+use crate::ty::{TyCtxt, Visibility};
 
 /// Represents the levels of effective visibility an item can have.
 ///
@@ -90,7 +93,7 @@ impl EffectiveVisibility {
 /// Holds a map of effective visibilities for reachable HIR nodes.
 #[derive(Clone, Debug)]
 pub struct EffectiveVisibilities<Id = LocalDefId> {
-    map: FxHashMap<Id, EffectiveVisibility>,
+    map: FxIndexMap<Id, EffectiveVisibility>,
 }
 
 impl EffectiveVisibilities {
@@ -130,9 +133,8 @@ impl EffectiveVisibilities {
         eff_vis: &EffectiveVisibility,
         tcx: TyCtxt<'_>,
     ) {
-        use std::collections::hash_map::Entry;
         match self.map.entry(def_id) {
-            Entry::Occupied(mut occupied) => {
+            IndexEntry::Occupied(mut occupied) => {
                 let old_eff_vis = occupied.get_mut();
                 for l in Level::all_levels() {
                     let vis_at_level = eff_vis.at_level(l);
@@ -145,7 +147,7 @@ impl EffectiveVisibilities {
                 }
                 old_eff_vis
             }
-            Entry::Vacant(vacant) => vacant.insert(*eff_vis),
+            IndexEntry::Vacant(vacant) => vacant.insert(*eff_vis),
         };
     }
 
@@ -244,7 +246,9 @@ impl<Id: Eq + Hash> EffectiveVisibilities<Id> {
                 if !(inherited_effective_vis_at_prev_level == inherited_effective_vis_at_level
                     && level != l)
                 {
-                    calculated_effective_vis = if let Some(max_vis) = max_vis && !max_vis.is_at_least(inherited_effective_vis_at_level, tcx) {
+                    calculated_effective_vis = if let Some(max_vis) = max_vis
+                        && !max_vis.is_at_least(inherited_effective_vis_at_level, tcx)
+                    {
                         max_vis
                     } else {
                         inherited_effective_vis_at_level

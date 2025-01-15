@@ -1,9 +1,9 @@
-// compile-flags:-Zprint-mono-items=eager -Zinline-mir=no
+//@ compile-flags:-Zprint-mono-items=eager -Zinline-mir=no -Copt-level=0
 
 #![deny(dead_code)]
 #![feature(start)]
 
-// aux-build:cgu_export_trait_method.rs
+//@ aux-build:cgu_export_trait_method.rs
 extern crate cgu_export_trait_method;
 
 use cgu_export_trait_method::Trait;
@@ -23,8 +23,6 @@ fn start(_: isize, _: *const *const u8) -> isize {
     let _ = Trait::with_default_impl(0u32);
     //~ MONO_ITEM fn <char as cgu_export_trait_method::Trait>::with_default_impl
     let _ = Trait::with_default_impl('c');
-
-
 
     //~ MONO_ITEM fn <u32 as cgu_export_trait_method::Trait>::with_default_impl_generic::<&str>
     let _ = Trait::with_default_impl_generic(0u32, "abc");

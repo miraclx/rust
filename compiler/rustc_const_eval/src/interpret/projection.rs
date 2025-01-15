@@ -10,14 +10,25 @@
 use std::marker::PhantomData;
 use std::ops::Range;
 
-use rustc_middle::mir;
-use rustc_middle::ty;
-use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
+use rustc_abi::{self as abi, Size, VariantIdx};
 use rustc_middle::ty::Ty;
-use rustc_target::abi::Size;
-use rustc_target::abi::{self, VariantIdx};
+use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
+use rustc_middle::{bug, mir, span_bug, ty};
+use tracing::{debug, instrument};
 
-use super::{InterpCx, InterpResult, MPlaceTy, Machine, MemPlaceMeta, OpTy, Provenance, Scalar};
+use super::{
+    InterpCx, InterpResult, MPlaceTy, Machine, MemPlaceMeta, OpTy, Provenance, Scalar, err_ub,
+    interp_ok, throw_ub, throw_unsup,
+};
+
+/// Describes the constraints placed on offset-projections.
+#[derive(Copy, Clone, Debug)]
+pub enum OffsetMode {
+    /// The offset has to be inbounds, like `ptr::offset`.
+    Inbounds,
+    /// No constraints, just wrap around the edge of the address space.
+    Wrapping,
+}
 
 /// A thing that we can project into, and that has a layout.
 pub trait Projectable<'tcx, Prov: Provenance>: Sized + std::fmt::Debug {
@@ -28,9 +39,9 @@ pub trait Projectable<'tcx, Prov: Provenance>: Sized + std::fmt::Debug {
     fn meta(&self) -> MemPlaceMeta<Prov>;
 
     /// Get the length of a slice/string/array stored here.
-    fn len<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn len<M: Machine<'tcx, Provenance = Prov>>(
         &self,
-        ecx: &InterpCx<'mir, 'tcx, M>,
+        ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, u64> {
         let layout = self.layout();
         if layout.is_unsized() {
@@ -43,53 +54,58 @@ pub trait Projectable<'tcx, Prov: Provenance>: Sized + std::fmt::Debug {
             // Go through the layout. There are lots of types that support a length,
             // e.g., SIMD types. (But not all repr(simd) types even have FieldsShape::Array!)
             match layout.fields {
-                abi::FieldsShape::Array { count, .. } => Ok(count),
+                abi::FieldsShape::Array { count, .. } => interp_ok(count),
                 _ => bug!("len not supported on sized type {:?}", layout.ty),
             }
         }
     }
 
     /// Offset the value by the given amount, replacing the layout and metadata.
-    fn offset_with_meta<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn offset_with_meta<M: Machine<'tcx, Provenance = Prov>>(
         &self,
         offset: Size,
+        mode: OffsetMode,
         meta: MemPlaceMeta<Prov>,
         layout: TyAndLayout<'tcx>,
-        ecx: &InterpCx<'mir, 'tcx, M>,
+        ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, Self>;
 
-    #[inline]
-    fn offset<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn offset<M: Machine<'tcx, Provenance = Prov>>(
         &self,
         offset: Size,
         layout: TyAndLayout<'tcx>,
-        ecx: &InterpCx<'mir, 'tcx, M>,
+        ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, Self> {
         assert!(layout.is_sized());
-        self.offset_with_meta(offset, MemPlaceMeta::None, layout, ecx)
+        // We sometimes do pointer arithmetic with this function, disregarding the source type.
+        // So we don't check the sizes here.
+        self.offset_with_meta(offset, OffsetMode::Inbounds, MemPlaceMeta::None, layout, ecx)
     }
 
-    #[inline]
-    fn transmute<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    /// This does an offset-by-zero, which is effectively a transmute. Note however that
+    /// not all transmutes are supported by all projectables -- specifically, if this is an
+    /// `OpTy` or `ImmTy`, the new layout must have almost the same ABI as the old one
+    /// (only changing the `valid_range` is allowed and turning integers into pointers).
+    fn transmute<M: Machine<'tcx, Provenance = Prov>>(
         &self,
         layout: TyAndLayout<'tcx>,
-        ecx: &InterpCx<'mir, 'tcx, M>,
+        ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, Self> {
         assert!(self.layout().is_sized() && layout.is_sized());
         assert_eq!(self.layout().size, layout.size);
-        self.offset_with_meta(Size::ZERO, MemPlaceMeta::None, layout, ecx)
+        self.offset_with_meta(Size::ZERO, OffsetMode::Wrapping, MemPlaceMeta::None, layout, ecx)
     }
 
     /// Convert this to an `OpTy`. This might be an irreversible transformation, but is useful for
     /// reading from this thing.
-    fn to_op<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn to_op<M: Machine<'tcx, Provenance = Prov>>(
         &self,
-        ecx: &InterpCx<'mir, 'tcx, M>,
+        ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, OpTy<'tcx, M::Provenance>>;
 }
 
 /// A type representing iteration over the elements of an array.
-pub struct ArrayIterator<'tcx, 'a, Prov: Provenance + 'static, P: Projectable<'tcx, Prov>> {
+pub struct ArrayIterator<'a, 'tcx, Prov: Provenance, P: Projectable<'tcx, Prov>> {
     base: &'a P,
     range: Range<u64>,
     stride: Size,
@@ -97,24 +113,32 @@ pub struct ArrayIterator<'tcx, 'a, Prov: Provenance + 'static, P: Projectable<'t
     _phantom: PhantomData<Prov>, // otherwise it says `Prov` is never used...
 }
 
-impl<'tcx, 'a, Prov: Provenance + 'static, P: Projectable<'tcx, Prov>>
-    ArrayIterator<'tcx, 'a, Prov, P>
-{
+impl<'a, 'tcx, Prov: Provenance, P: Projectable<'tcx, Prov>> ArrayIterator<'a, 'tcx, Prov, P> {
     /// Should be the same `ecx` on each call, and match the one used to create the iterator.
-    pub fn next<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    pub fn next<M: Machine<'tcx, Provenance = Prov>>(
         &mut self,
-        ecx: &InterpCx<'mir, 'tcx, M>,
+        ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, Option<(u64, P)>> {
-        let Some(idx) = self.range.next() else { return Ok(None) };
-        Ok(Some((idx, self.base.offset(self.stride * idx, self.field_layout, ecx)?)))
+        let Some(idx) = self.range.next() else { return interp_ok(None) };
+        // We use `Wrapping` here since the offset has already been checked when the iterator was created.
+        interp_ok(Some((
+            idx,
+            self.base.offset_with_meta(
+                self.stride * idx,
+                OffsetMode::Wrapping,
+                MemPlaceMeta::None,
+                self.field_layout,
+                ecx,
+            )?,
+        )))
     }
 }
 
 // FIXME: Working around https://github.com/rust-lang/rust/issues/54385
-impl<'mir, 'tcx: 'mir, Prov, M> InterpCx<'mir, 'tcx, M>
+impl<'tcx, Prov, M> InterpCx<'tcx, M>
 where
-    Prov: Provenance + 'static,
-    M: Machine<'mir, 'tcx, Provenance = Prov>,
+    Prov: Provenance,
+    M: Machine<'tcx, Provenance = Prov>,
 {
     /// Offset a pointer to project to a field of a struct/union. Unlike `place_field`, this is
     /// always possible without allocating, so it can take `&self`. Also return the field's layout.
@@ -133,26 +157,37 @@ where
             "`field` projection called on a slice -- call `index` projection instead"
         );
         let offset = base.layout().fields.offset(field);
+        // Computing the layout does normalization, so we get a normalized type out of this
+        // even if the field type is non-normalized (possible e.g. via associated types).
         let field_layout = base.layout().field(self, field);
 
         // Offset may need adjustment for unsized fields.
         let (meta, offset) = if field_layout.is_unsized() {
-            if base.layout().is_sized() {
-                // An unsized field of a sized type? Sure...
-                // But const-prop actually feeds us such nonsense MIR! (see test `const_prop/issue-86351.rs`)
-                throw_inval!(ConstPropNonsense);
-            }
+            assert!(!base.layout().is_sized());
             let base_meta = base.meta();
             // Re-use parent metadata to determine dynamic field layout.
             // With custom DSTS, this *will* execute user-defined code, but the same
             // happens at run-time so that's okay.
             match self.size_and_align_of(&base_meta, &field_layout)? {
-                Some((_, align)) => (base_meta, offset.align_to(align)),
-                None => {
-                    // For unsized types with an extern type tail we perform no adjustments.
-                    // NOTE: keep this in sync with `PlaceRef::project_field` in the codegen backend.
-                    assert!(matches!(base_meta, MemPlaceMeta::None));
+                Some((_, align)) => {
+                    // For packed types, we need to cap alignment.
+                    let align = if let ty::Adt(def, _) = base.layout().ty.kind()
+                        && let Some(packed) = def.repr().pack
+                    {
+                        align.min(packed)
+                    } else {
+                        align
+                    };
+                    (base_meta, offset.align_to(align))
+                }
+                None if offset == Size::ZERO => {
+                    // If the offset is 0, then rounding it up to alignment wouldn't change anything,
+                    // so we can do this even for types where we cannot determine the alignment.
                     (base_meta, offset)
+                }
+                None => {
+                    // We cannot know the alignment of this field, so we cannot adjust.
+                    throw_unsup!(ExternTypeField)
                 }
             }
         } else {
@@ -161,7 +196,7 @@ where
             (MemPlaceMeta::None, offset)
         };
 
-        base.offset_with_meta(offset, meta, field_layout, self)
+        base.offset_with_meta(offset, OffsetMode::Inbounds, meta, field_layout, self)
     }
 
     /// Downcasting to an enum variant.
@@ -176,11 +211,9 @@ where
         // see https://github.com/rust-lang/rust/issues/93688#issuecomment-1032929496.)
         // So we just "offset" by 0.
         let layout = base.layout().for_variant(self, variant);
-        if layout.abi.is_uninhabited() {
-            // `read_discriminant` should have excluded uninhabited variants... but ConstProp calls
-            // us on dead code.
-            throw_inval!(ConstPropNonsense)
-        }
+        // This variant may in fact be uninhabited.
+        // See <https://github.com/rust-lang/rust/issues/120337>.
+
         // This cannot be `transmute` as variants *can* have a smaller size than the entire enum.
         base.offset(Size::ZERO, layout, self)
     }
@@ -200,7 +233,11 @@ where
                     // This can only be reached in ConstProp and non-rustc-MIR.
                     throw_ub!(BoundsCheckFailed { len, index });
                 }
-                let offset = stride * index; // `Size` multiplication
+                // With raw slices, `len` can be so big that this *can* overflow.
+                let offset = self
+                    .compute_size_in_bytes(stride, index)
+                    .ok_or_else(|| err_ub!(PointerArithOverflow))?;
+
                 // All fields have the same layout.
                 let field_layout = base.layout().field(self, 0);
                 (offset, field_layout)
@@ -213,6 +250,19 @@ where
         };
 
         base.offset(offset, field_layout, self)
+    }
+
+    /// Converts a repr(simd) value into an array of the right size, such that `project_index`
+    /// accesses the SIMD elements. Also returns the number of elements.
+    pub fn project_to_simd<P: Projectable<'tcx, M::Provenance>>(
+        &self,
+        base: &P,
+    ) -> InterpResult<'tcx, (P, u64)> {
+        assert!(base.layout().ty.ty_adt_def().unwrap().repr().simd());
+        // SIMD types must be newtypes around arrays, so all we have to do is project to their only field.
+        let array = self.project_field(base, 0)?;
+        let len = array.len(self)?;
+        interp_ok((array, len))
     }
 
     fn project_constant_index<P: Projectable<'tcx, M::Provenance>>(
@@ -240,17 +290,27 @@ where
     }
 
     /// Iterates over all fields of an array. Much more efficient than doing the
-    /// same by repeatedly calling `operand_index`.
+    /// same by repeatedly calling `project_index`.
     pub fn project_array_fields<'a, P: Projectable<'tcx, M::Provenance>>(
         &self,
         base: &'a P,
-    ) -> InterpResult<'tcx, ArrayIterator<'tcx, 'a, M::Provenance, P>> {
+    ) -> InterpResult<'tcx, ArrayIterator<'a, 'tcx, M::Provenance, P>> {
         let abi::FieldsShape::Array { stride, .. } = base.layout().fields else {
-            span_bug!(self.cur_span(), "operand_array_fields: expected an array layout");
+            span_bug!(self.cur_span(), "project_array_fields: expected an array layout");
         };
         let len = base.len(self)?;
         let field_layout = base.layout().field(self, 0);
-        Ok(ArrayIterator { base, range: 0..len, stride, field_layout, _phantom: PhantomData })
+        // Ensure that all the offsets are in-bounds once, up-front.
+        debug!("project_array_fields: {base:?} {len}");
+        base.offset(len * stride, self.layout_of(self.tcx.types.unit).unwrap(), self)?;
+        // Create the iterator.
+        interp_ok(ArrayIterator {
+            base,
+            range: 0..len,
+            stride,
+            field_layout,
+            _phantom: PhantomData,
+        })
     }
 
     /// Subslicing
@@ -263,9 +323,9 @@ where
     ) -> InterpResult<'tcx, P> {
         let len = base.len(self)?; // also asserts that we have a type where this makes sense
         let actual_to = if from_end {
-            if from.checked_add(to).map_or(true, |to| to > len) {
+            if from.checked_add(to).is_none_or(|to| to > len) {
                 // This can only be reached in ConstProp and non-rustc-MIR.
-                throw_ub!(BoundsCheckFailed { len: len, index: from.saturating_add(to) });
+                throw_ub!(BoundsCheckFailed { len, index: from.saturating_add(to) });
             }
             len.checked_sub(to).unwrap()
         } else {
@@ -307,7 +367,7 @@ where
         };
         let layout = self.layout_of(ty)?;
 
-        base.offset_with_meta(from_offset, meta, layout, self)
+        base.offset_with_meta(from_offset, OffsetMode::Inbounds, meta, layout, self)
     }
 
     /// Applying a general projection
@@ -317,14 +377,18 @@ where
         P: Projectable<'tcx, M::Provenance> + From<MPlaceTy<'tcx, M::Provenance>> + std::fmt::Debug,
     {
         use rustc_middle::mir::ProjectionElem::*;
-        Ok(match proj_elem {
-            OpaqueCast(ty) => base.transmute(self.layout_of(ty)?, self)?,
+        interp_ok(match proj_elem {
+            OpaqueCast(ty) => {
+                span_bug!(self.cur_span(), "OpaqueCast({ty}) encountered after borrowck")
+            }
+            // We don't want anything happening here, this is here as a dummy.
+            Subtype(_) => base.transmute(base.layout(), self)?,
             Field(field, _) => self.project_field(base, field.index())?,
             Downcast(_, variant) => self.project_downcast(base, variant)?,
             Deref => self.deref_pointer(&base.to_op(self)?)?.into(),
             Index(local) => {
                 let layout = self.layout_of(self.tcx.types.usize)?;
-                let n = self.local_to_op(self.frame(), local, Some(layout))?;
+                let n = self.local_to_op(local, Some(layout))?;
                 let n = self.read_target_usize(&n)?;
                 self.project_index(base, n)?
             }

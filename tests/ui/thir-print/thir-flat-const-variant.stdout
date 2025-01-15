@@ -11,9 +11,12 @@ Thir {
                 fields: [],
             },
             ty: (),
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:12:32: 12:34 (#0),
         },
         Expr {
@@ -25,9 +28,12 @@ Thir {
                 value: e0,
             },
             ty: (),
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:12:32: 12:34 (#0),
         },
         Expr {
@@ -47,9 +53,12 @@ Thir {
                 },
             ),
             ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:12:23: 12:35 (#0),
         },
         Expr {
@@ -61,21 +70,12 @@ Thir {
                 value: e2,
             },
             ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
-            span: $DIR/thir-flat-const-variant.rs:12:23: 12:35 (#0),
-        },
-        Expr {
-            kind: Scope {
-                region_scope: Destruction(3),
-                lint_level: Inherited,
-                value: e3,
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
             },
-            ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
             span: $DIR/thir-flat-const-variant.rs:12:23: 12:35 (#0),
         },
     ],
@@ -96,9 +96,12 @@ Thir {
                 fields: [],
             },
             ty: (),
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:13:33: 13:35 (#0),
         },
         Expr {
@@ -110,9 +113,12 @@ Thir {
                 value: e0,
             },
             ty: (),
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:13:33: 13:35 (#0),
         },
         Expr {
@@ -132,9 +138,12 @@ Thir {
                 },
             ),
             ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:13:23: 13:36 (#0),
         },
         Expr {
@@ -146,21 +155,12 @@ Thir {
                 value: e2,
             },
             ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
-            span: $DIR/thir-flat-const-variant.rs:13:23: 13:36 (#0),
-        },
-        Expr {
-            kind: Scope {
-                region_scope: Destruction(3),
-                lint_level: Inherited,
-                value: e3,
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
             },
-            ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
             span: $DIR/thir-flat-const-variant.rs:13:23: 13:36 (#0),
         },
     ],
@@ -181,9 +181,12 @@ Thir {
                 fields: [],
             },
             ty: (),
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:14:33: 14:35 (#0),
         },
         Expr {
@@ -195,9 +198,12 @@ Thir {
                 value: e0,
             },
             ty: (),
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:14:33: 14:35 (#0),
         },
         Expr {
@@ -217,9 +223,12 @@ Thir {
                 },
             ),
             ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:14:24: 14:36 (#0),
         },
         Expr {
@@ -231,21 +240,12 @@ Thir {
                 value: e2,
             },
             ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
-            span: $DIR/thir-flat-const-variant.rs:14:24: 14:36 (#0),
-        },
-        Expr {
-            kind: Scope {
-                region_scope: Destruction(3),
-                lint_level: Inherited,
-                value: e3,
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
             },
-            ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
             span: $DIR/thir-flat-const-variant.rs:14:24: 14:36 (#0),
         },
     ],
@@ -266,9 +266,12 @@ Thir {
                 fields: [],
             },
             ty: (),
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:15:34: 15:36 (#0),
         },
         Expr {
@@ -280,9 +283,12 @@ Thir {
                 value: e0,
             },
             ty: (),
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:15:34: 15:36 (#0),
         },
         Expr {
@@ -302,9 +308,12 @@ Thir {
                 },
             ),
             ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:15:24: 15:37 (#0),
         },
         Expr {
@@ -316,21 +325,12 @@ Thir {
                 value: e2,
             },
             ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
-            span: $DIR/thir-flat-const-variant.rs:15:24: 15:37 (#0),
-        },
-        Expr {
-            kind: Scope {
-                region_scope: Destruction(3),
-                lint_level: Inherited,
-                value: e3,
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(3),
+                ),
+                backwards_incompatible: None,
             },
-            ty: Foo,
-            temp_lifetime: Some(
-                Node(3),
-            ),
             span: $DIR/thir-flat-const-variant.rs:15:24: 15:37 (#0),
         },
     ],
@@ -348,7 +348,6 @@ Thir {
         Block {
             targeted_by_break: false,
             region_scope: Node(1),
-            opt_destruction_scope: None,
             span: $DIR/thir-flat-const-variant.rs:18:11: 18:13 (#0),
             stmts: [],
             expr: None,
@@ -361,9 +360,12 @@ Thir {
                 block: b0,
             },
             ty: (),
-            temp_lifetime: Some(
-                Node(2),
-            ),
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(2),
+                ),
+                backwards_incompatible: None,
+            },
             span: $DIR/thir-flat-const-variant.rs:18:11: 18:13 (#0),
         },
         Expr {
@@ -375,21 +377,12 @@ Thir {
                 value: e0,
             },
             ty: (),
-            temp_lifetime: Some(
-                Node(2),
-            ),
-            span: $DIR/thir-flat-const-variant.rs:18:11: 18:13 (#0),
-        },
-        Expr {
-            kind: Scope {
-                region_scope: Destruction(2),
-                lint_level: Inherited,
-                value: e1,
+            temp_lifetime: TempLifetime {
+                temp_lifetime: Some(
+                    Node(2),
+                ),
+                backwards_incompatible: None,
             },
-            ty: (),
-            temp_lifetime: Some(
-                Node(2),
-            ),
             span: $DIR/thir-flat-const-variant.rs:18:11: 18:13 (#0),
         },
     ],

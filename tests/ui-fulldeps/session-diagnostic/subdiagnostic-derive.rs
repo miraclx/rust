@@ -1,12 +1,12 @@
-// check-fail
+//@ check-fail
 // Tests error conditions for specifying subdiagnostics using #[derive(Subdiagnostic)]
 
 // The proc_macro2 crate handles spans differently when on beta/stable release rather than nightly,
 // changing the output of this test. Since Subdiagnostic is strictly internal to the compiler
 // the test is just ignored on stable and beta:
-// ignore-stage1
-// ignore-beta
-// ignore-stable
+//@ ignore-stage1
+//@ ignore-beta
+//@ ignore-stable
 
 #![feature(rustc_private)]
 #![crate_type = "lib"]
@@ -17,12 +17,11 @@ extern crate rustc_macros;
 extern crate rustc_session;
 extern crate rustc_span;
 
-use rustc_errors::{Applicability, DiagnosticMessage, SubdiagnosticMessage};
-use rustc_fluent_macro::fluent_messages;
+use rustc_errors::{Applicability, DiagMessage, SubdiagMessage};
 use rustc_macros::Subdiagnostic;
 use rustc_span::Span;
 
-fluent_messages! { "./example.ftl" }
+rustc_fluent_macro::fluent_messages! { "./example.ftl" }
 
 #[derive(Subdiagnostic)]
 #[label(no_crate_example)]
@@ -95,8 +94,8 @@ struct G {
 
 #[derive(Subdiagnostic)]
 #[label("...")]
-//~^ ERROR failed to resolve: maybe a missing crate `core`?
-//~| NOTE maybe a missing crate `core`?
+//~^ ERROR failed to resolve: you might be missing crate `core`
+//~| NOTE you might be missing crate `core`
 struct H {
     #[primary_span]
     span: Span,
@@ -311,8 +310,8 @@ struct AB {
 
 #[derive(Subdiagnostic)]
 union AC {
-    //~^ ERROR failed to resolve: maybe a missing crate `core`?
-    //~| NOTE maybe a missing crate `core`?
+    //~^ ERROR failed to resolve: you might be missing crate `core`
+    //~| NOTE you might be missing crate `core`
     span: u32,
     b: u64,
 }
@@ -582,8 +581,8 @@ struct BD {
     span2: Span,
     #[suggestion_part(foo = "bar")]
     //~^ ERROR `code` is the only valid nested attribute
-    //~| ERROR failed to resolve: maybe a missing crate `core`?
-    //~| NOTE maybe a missing crate `core`?
+    //~| ERROR failed to resolve: you might be missing crate `core`
+    //~| NOTE you might be missing crate `core`
     span4: Span,
     #[suggestion_part(code = "...")]
     //~^ ERROR the `#[suggestion_part(...)]` attribute can only be applied to fields of type `Span` or `MultiSpan`
@@ -675,8 +674,8 @@ enum BL {
 struct BM {
     #[suggestion_part(code("foo"))]
     //~^ ERROR expected exactly one string literal for `code = ...`
-    //~| ERROR failed to resolve: maybe a missing crate `core`?
-    //~| NOTE maybe a missing crate `core`?
+    //~| ERROR failed to resolve: you might be missing crate `core`
+    //~| NOTE you might be missing crate `core`
     span: Span,
     r#type: String,
 }
@@ -686,8 +685,8 @@ struct BM {
 struct BN {
     #[suggestion_part(code("foo", "bar"))]
     //~^ ERROR expected exactly one string literal for `code = ...`
-    //~| ERROR failed to resolve: maybe a missing crate `core`?
-    //~| NOTE maybe a missing crate `core`?
+    //~| ERROR failed to resolve: you might be missing crate `core`
+    //~| NOTE you might be missing crate `core`
     span: Span,
     r#type: String,
 }
@@ -697,8 +696,8 @@ struct BN {
 struct BO {
     #[suggestion_part(code(3))]
     //~^ ERROR expected exactly one string literal for `code = ...`
-    //~| ERROR failed to resolve: maybe a missing crate `core`?
-    //~| NOTE maybe a missing crate `core`?
+    //~| ERROR failed to resolve: you might be missing crate `core`
+    //~| NOTE you might be missing crate `core`
     span: Span,
     r#type: String,
 }
@@ -719,8 +718,8 @@ struct BP {
 #[multipart_suggestion(no_crate_example)]
 struct BQ {
     #[suggestion_part(code = 3)]
-    //~^ ERROR failed to resolve: maybe a missing crate `core`?
-    //~| NOTE maybe a missing crate `core`?
+    //~^ ERROR failed to resolve: you might be missing crate `core`
+    //~| NOTE you might be missing crate `core`
     span: Span,
     r#type: String,
 }
@@ -812,8 +811,8 @@ struct SuggestionStyleInvalid3 {
 #[derive(Subdiagnostic)]
 #[suggestion(no_crate_example, code = "", style("foo"))]
 //~^ ERROR expected `= "xxx"`
-//~| ERROR failed to resolve: maybe a missing crate `core`?
-//~| NOTE maybe a missing crate `core`?
+//~| ERROR failed to resolve: you might be missing crate `core`
+//~| NOTE you might be missing crate `core`
 struct SuggestionStyleInvalid4 {
     #[primary_span]
     sub: Span,
@@ -827,4 +826,14 @@ struct PrimarySpanOnVec {
     //~^ ERROR `#[primary_span]` is not a valid attribute
     //~| NOTE there must be exactly one primary span
     sub: Vec<Span>,
+}
+
+#[derive(Subdiagnostic)]
+struct NestedParent {
+    #[subdiagnostic]
+    single_sub: A,
+    #[subdiagnostic]
+    option_sub: Option<A>,
+    #[subdiagnostic]
+    vec_sub: Vec<A>,
 }

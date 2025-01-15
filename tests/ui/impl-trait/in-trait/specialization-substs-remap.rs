@@ -1,10 +1,9 @@
-// check-pass
+//@ check-pass
 
 #![feature(specialization)]
-#![feature(return_position_impl_trait_in_trait)]
 #![allow(incomplete_features)]
 
-trait Foo {
+pub trait Foo {
     fn bar(&self) -> impl Sized;
 }
 
@@ -12,6 +11,7 @@ impl<U> Foo for U
 where
     U: Copy,
 {
+    #[expect(refining_impl_trait)]
     fn bar(&self) -> U {
         *self
     }

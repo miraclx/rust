@@ -1,8 +1,25 @@
+//@ revisions: linux apple
+//@ min-llvm-version: 19
+//@ compile-flags: -Copt-level=0 -Cno-prepopulate-passes -Zlint-llvm-ir -Cllvm-args=-lint-abort-on-error
+
+//@[linux] compile-flags: --target x86_64-unknown-linux-gnu
+//@[linux] needs-llvm-components: x86
+//@[apple] compile-flags: --target x86_64-apple-darwin
+//@[apple] needs-llvm-components: x86
+
 // Regression test for #29988
 
-// compile-flags: -C no-prepopulate-passes
-// only-x86_64
-// ignore-windows
+#![feature(no_core, lang_items)]
+#![crate_type = "lib"]
+#![no_std]
+#![no_core]
+
+#[lang = "sized"]
+trait Sized {}
+#[lang = "freeze"]
+trait Freeze {}
+#[lang = "copy"]
+trait Copy {}
 
 #[repr(C)]
 struct S {
@@ -15,11 +32,14 @@ extern "C" {
     fn foo(s: S);
 }
 
-fn main() {
+// CHECK-LABEL: @test
+#[no_mangle]
+pub fn test() {
     let s = S { f1: 1, f2: 2, f3: 3 };
     unsafe {
-        // CHECK: load { i64, i32 }, {{.*}}, align 4
-        // CHECK: call void @foo({ i64, i32 } {{.*}})
+        // CHECK: [[ALLOCA:%.+]] = alloca [16 x i8], align 8
+        // CHECK: [[LOAD:%.+]] = load { i64, i32 }, ptr [[ALLOCA]], align 8
+        // CHECK: call void @foo({ i64, i32 } [[LOAD]])
         foo(s);
     }
 }

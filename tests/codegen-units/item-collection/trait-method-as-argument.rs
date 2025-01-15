@@ -1,18 +1,21 @@
-// compile-flags:-Zprint-mono-items=eager -Zinline-mir=no
+//@ compile-flags:-Zprint-mono-items=eager -Zinline-mir=no
 
 #![deny(dead_code)]
 #![feature(start)]
 
-trait Trait : Sized {
-    fn foo(self) -> Self { self }
+trait Trait: Sized {
+    fn foo(self) -> Self {
+        self
+    }
 }
 
 impl Trait for u32 {
-    fn foo(self) -> u32 { self }
+    fn foo(self) -> u32 {
+        self
+    }
 }
 
-impl Trait for char {
-}
+impl Trait for char {}
 
 fn take_foo_once<T, F: FnOnce(T) -> T>(f: F, arg: T) -> T {
     (f)(arg)

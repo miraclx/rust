@@ -1,24 +1,27 @@
 #![feature(trait_upcasting)]
 #![allow(incomplete_features)]
 
+use std::fmt;
+
 fn main() {
     basic();
     diamond();
     struct_();
     replace_vptr();
-    vtable_mismatch_nop_cast();
+    vtable_nop_cast();
+    drop_principal();
 }
 
-fn vtable_mismatch_nop_cast() {
-    let ptr: &dyn std::fmt::Display = &0;
-    // Even though the vtable is for the wrong trait, this cast doesn't actually change the needed
-    // vtable so it should still be allowed.
-    let ptr: *const (dyn std::fmt::Debug + Send + Sync) = unsafe { std::mem::transmute(ptr) };
-    let _ptr2 = ptr as *const dyn std::fmt::Debug;
+fn vtable_nop_cast() {
+    let ptr: &dyn fmt::Debug = &0;
+    // We transmute things around, but the principal trait does not change, so this is allowed.
+    let ptr: *const (dyn fmt::Debug + Send + Sync) = unsafe { std::mem::transmute(ptr) };
+    // This cast is a NOP and should be allowed.
+    let _ptr2 = ptr as *const dyn fmt::Debug;
 }
 
 fn basic() {
-    trait Foo: PartialEq<i32> + std::fmt::Debug + Send + Sync {
+    trait Foo: PartialEq<i32> + fmt::Debug + Send + Sync {
         fn a(&self) -> i32 {
             10
         }
@@ -67,7 +70,7 @@ fn basic() {
     }
 
     let baz: &dyn Baz = &1;
-    let _: &dyn std::fmt::Debug = baz;
+    let _up: &dyn fmt::Debug = baz;
     assert_eq!(*baz, 1);
     assert_eq!(baz.a(), 100);
     assert_eq!(baz.b(), 200);
@@ -77,7 +80,7 @@ fn basic() {
     assert_eq!(baz.w(), 21);
 
     let bar: &dyn Bar = baz;
-    let _: &dyn std::fmt::Debug = bar;
+    let _up: &dyn fmt::Debug = bar;
     assert_eq!(*bar, 1);
     assert_eq!(bar.a(), 100);
     assert_eq!(bar.b(), 200);
@@ -86,14 +89,14 @@ fn basic() {
     assert_eq!(bar.w(), 21);
 
     let foo: &dyn Foo = baz;
-    let _: &dyn std::fmt::Debug = foo;
+    let _up: &dyn fmt::Debug = foo;
     assert_eq!(*foo, 1);
     assert_eq!(foo.a(), 100);
     assert_eq!(foo.z(), 11);
     assert_eq!(foo.y(), 12);
 
     let foo: &dyn Foo = bar;
-    let _: &dyn std::fmt::Debug = foo;
+    let _up: &dyn fmt::Debug = foo;
     assert_eq!(*foo, 1);
     assert_eq!(foo.a(), 100);
     assert_eq!(foo.z(), 11);
@@ -101,7 +104,7 @@ fn basic() {
 }
 
 fn diamond() {
-    trait Foo: PartialEq<i32> + std::fmt::Debug + Send + Sync {
+    trait Foo: PartialEq<i32> + fmt::Debug + Send + Sync {
         fn a(&self) -> i32 {
             10
         }
@@ -166,7 +169,7 @@ fn diamond() {
     }
 
     let baz: &dyn Baz = &1;
-    let _: &dyn std::fmt::Debug = baz;
+    let _up: &dyn fmt::Debug = baz;
     assert_eq!(*baz, 1);
     assert_eq!(baz.a(), 100);
     assert_eq!(baz.b(), 200);
@@ -178,7 +181,7 @@ fn diamond() {
     assert_eq!(baz.v(), 31);
 
     let bar1: &dyn Bar1 = baz;
-    let _: &dyn std::fmt::Debug = bar1;
+    let _up: &dyn fmt::Debug = bar1;
     assert_eq!(*bar1, 1);
     assert_eq!(bar1.a(), 100);
     assert_eq!(bar1.b(), 200);
@@ -187,7 +190,7 @@ fn diamond() {
     assert_eq!(bar1.w(), 21);
 
     let bar2: &dyn Bar2 = baz;
-    let _: &dyn std::fmt::Debug = bar2;
+    let _up: &dyn fmt::Debug = bar2;
     assert_eq!(*bar2, 1);
     assert_eq!(bar2.a(), 100);
     assert_eq!(bar2.c(), 300);
@@ -196,17 +199,17 @@ fn diamond() {
     assert_eq!(bar2.v(), 31);
 
     let foo: &dyn Foo = baz;
-    let _: &dyn std::fmt::Debug = foo;
+    let _up: &dyn fmt::Debug = foo;
     assert_eq!(*foo, 1);
     assert_eq!(foo.a(), 100);
 
     let foo: &dyn Foo = bar1;
-    let _: &dyn std::fmt::Debug = foo;
+    let _up: &dyn fmt::Debug = foo;
     assert_eq!(*foo, 1);
     assert_eq!(foo.a(), 100);
 
     let foo: &dyn Foo = bar2;
-    let _: &dyn std::fmt::Debug = foo;
+    let _up: &dyn fmt::Debug = foo;
     assert_eq!(*foo, 1);
     assert_eq!(foo.a(), 100);
 }
@@ -215,7 +218,7 @@ fn struct_() {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    trait Foo: PartialEq<i32> + std::fmt::Debug + Send + Sync {
+    trait Foo: PartialEq<i32> + fmt::Debug + Send + Sync {
         fn a(&self) -> i32 {
             10
         }
@@ -383,14 +386,17 @@ fn struct_() {
 
 fn replace_vptr() {
     trait A {
+        #[allow(dead_code)]
         fn foo_a(&self);
     }
 
     trait B {
+        #[allow(dead_code)]
         fn foo_b(&self);
     }
 
     trait C: A + B {
+        #[allow(dead_code)]
         fn foo_c(&self);
     }
 
@@ -424,4 +430,55 @@ fn replace_vptr() {
 
     let s = S(42);
     invoke_outer(&s);
+}
+
+fn drop_principal() {
+    use std::alloc::Layout;
+    use std::any::Any;
+
+    const fn yeet_principal(x: Box<dyn Any + Send>) -> Box<dyn Send> {
+        x
+    }
+
+    trait Bar: Send + Sync {}
+
+    impl<T: Send + Sync> Bar for T {}
+
+    const fn yeet_principal_2(x: Box<dyn Bar>) -> Box<dyn Send> {
+        x
+    }
+
+    struct CallMe<F: FnOnce()>(Option<F>);
+
+    impl<F: FnOnce()> CallMe<F> {
+        fn new(f: F) -> Self {
+            CallMe(Some(f))
+        }
+    }
+
+    impl<F: FnOnce()> Drop for CallMe<F> {
+        fn drop(&mut self) {
+            (self.0.take().unwrap())();
+        }
+    }
+
+    fn goodbye() {
+        println!("goodbye");
+    }
+
+    let x = Box::new(CallMe::new(goodbye)) as Box<dyn Any + Send>;
+    let x_layout = Layout::for_value(&*x);
+    let y = yeet_principal(x);
+    let y_layout = Layout::for_value(&*y);
+    assert_eq!(x_layout, y_layout);
+    println!("before");
+    drop(y);
+
+    let x = Box::new(CallMe::new(goodbye)) as Box<dyn Bar>;
+    let x_layout = Layout::for_value(&*x);
+    let y = yeet_principal_2(x);
+    let y_layout = Layout::for_value(&*y);
+    assert_eq!(x_layout, y_layout);
+    println!("before");
+    drop(y);
 }

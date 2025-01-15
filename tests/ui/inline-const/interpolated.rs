@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(inline_const)]
+//@ check-pass
 
 // This used to be unsupported since the parser first tries to check if we have
 // any nested items, and then checks for statements (and expressions). The heuristic

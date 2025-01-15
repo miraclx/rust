@@ -48,4 +48,21 @@ fn other_markdown() {}
 ///   /// `lol`
 ///   pub struct Struct;
 ///   ```
-fn iss_7421() {}
+fn issue_7421() {}
+
+/// `
+//~^ ERROR: backticks are unbalanced
+fn escape_0() {}
+
+/// Escaped \` backticks don't count.
+fn escape_1() {}
+
+/// Escaped \` \` backticks don't count.
+fn escape_2() {}
+
+/// Escaped \` ` backticks don't count, but unescaped backticks do.
+//~^ ERROR: backticks are unbalanced
+fn escape_3() {}
+
+/// Backslashes ` \` within code blocks don't count.
+fn escape_4() {}

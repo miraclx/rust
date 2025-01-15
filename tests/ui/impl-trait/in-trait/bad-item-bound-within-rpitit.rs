@@ -1,8 +1,7 @@
 // issue: 114145
 
-#![feature(return_position_impl_trait_in_trait)]
 
-trait Iterable {
+pub trait Iterable {
     type Item<'a>
     where
         Self: 'a;
@@ -17,6 +16,7 @@ impl<'a, I: 'a + Iterable> Iterable for &'a I {
     //~^ ERROR impl has stricter requirements than trait
 
     fn iter(&self) -> impl 'a + Iterator<Item = I::Item<'a>> {
+        //~^ WARN impl trait in impl method signature does not match trait method signature
         (*self).iter()
     }
 }

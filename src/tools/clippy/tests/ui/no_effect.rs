@@ -1,6 +1,5 @@
 #![feature(fn_traits, unboxed_closures)]
 #![warn(clippy::no_effect_underscore_binding)]
-#![allow(dead_code, path_statements)]
 #![allow(
     clippy::deref_addrof,
     clippy::redundant_field_names,
@@ -9,7 +8,30 @@
     clippy::useless_vec
 )]
 
-struct Unit;
+use std::fmt::Display;
+use std::ops::{Neg, Shl};
+
+struct Cout;
+
+impl<T> Shl<T> for Cout
+where
+    T: Display,
+{
+    type Output = Self;
+    fn shl(self, rhs: T) -> Self::Output {
+        println!("{}", rhs);
+        self
+    }
+}
+
+impl Neg for Cout {
+    type Output = Self;
+    fn neg(self) -> Self::Output {
+        println!("hello world");
+        self
+    }
+}
+
 struct Tuple(i32);
 struct Struct {
     field: i32,
@@ -17,10 +39,6 @@ struct Struct {
 enum Enum {
     Tuple(i32),
     Struct { field: i32 },
-}
-struct DropUnit;
-impl Drop for DropUnit {
-    fn drop(&mut self) {}
 }
 struct DropStruct {
     field: i32,
@@ -93,14 +111,8 @@ impl FnOnce<(&str,)> for GreetStruct3 {
 
 fn main() {
     let s = get_struct();
-    let s2 = get_struct();
 
     0;
-    //~^ ERROR: statement with no effect
-    //~| NOTE: `-D clippy::no-effect` implied by `-D warnings`
-    s2;
-    //~^ ERROR: statement with no effect
-    Unit;
     //~^ ERROR: statement with no effect
     Tuple(0);
     //~^ ERROR: statement with no effect
@@ -157,6 +169,8 @@ fn main() {
     //~^ ERROR: binding to `_` prefixed variable with no side-effect
     let _cat = [2, 4, 6, 8][2];
     //~^ ERROR: binding to `_` prefixed variable with no side-effect
+    let _issue_12166 = 42;
+    let underscore_variable_above_can_be_used_dont_lint = _issue_12166;
 
     #[allow(clippy::no_effect)]
     0;
@@ -166,7 +180,6 @@ fn main() {
     unsafe { unsafe_fn() };
     let _used = get_struct();
     let _x = vec![1];
-    DropUnit;
     DropStruct { field: 0 };
     DropTuple(0);
     DropEnum::Tuple(0);
@@ -174,4 +187,11 @@ fn main() {
     GreetStruct1("world");
     GreetStruct2()("world");
     GreetStruct3 {}("world");
+
+    fn n() -> i32 {
+        42
+    }
+
+    Cout << 142;
+    -Cout;
 }

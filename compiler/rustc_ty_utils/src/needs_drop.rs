@@ -2,41 +2,84 @@
 
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def_id::DefId;
+use rustc_middle::bug;
 use rustc_middle::query::Providers;
-use rustc_middle::ty::util::{needs_drop_components, AlwaysRequiresDrop};
-use rustc_middle::ty::GenericArgsRef;
-use rustc_middle::ty::{self, EarlyBinder, Ty, TyCtxt};
+use rustc_middle::ty::util::{AlwaysRequiresDrop, needs_drop_components};
+use rustc_middle::ty::{self, EarlyBinder, GenericArgsRef, Ty, TyCtxt};
 use rustc_session::Limit;
-use rustc_span::{sym, DUMMY_SP};
+use rustc_span::sym;
+use tracing::{debug, instrument};
 
 use crate::errors::NeedsDropOverflow;
 
 type NeedsDropResult<T> = Result<T, AlwaysRequiresDrop>;
 
-fn needs_drop_raw<'tcx>(tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
+fn needs_drop_raw<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    query: ty::PseudoCanonicalInput<'tcx, Ty<'tcx>>,
+) -> bool {
     // If we don't know a type doesn't need drop, for example if it's a type
     // parameter without a `Copy` bound, then we conservatively return that it
     // needs drop.
     let adt_has_dtor =
         |adt_def: ty::AdtDef<'tcx>| adt_def.destructor(tcx).map(|_| DtorType::Significant);
-    let res =
-        drop_tys_helper(tcx, query.value, query.param_env, adt_has_dtor, false).next().is_some();
+    let res = drop_tys_helper(tcx, query.value, query.typing_env, adt_has_dtor, false, false)
+        .filter(filter_array_elements(tcx, query.typing_env))
+        .next()
+        .is_some();
 
     debug!("needs_drop_raw({:?}) = {:?}", query, res);
     res
 }
 
+fn needs_async_drop_raw<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    query: ty::PseudoCanonicalInput<'tcx, Ty<'tcx>>,
+) -> bool {
+    // If we don't know a type doesn't need async drop, for example if it's a
+    // type parameter without a `Copy` bound, then we conservatively return that
+    // it needs async drop.
+    let adt_has_async_dtor =
+        |adt_def: ty::AdtDef<'tcx>| adt_def.async_destructor(tcx).map(|_| DtorType::Significant);
+    let res = drop_tys_helper(tcx, query.value, query.typing_env, adt_has_async_dtor, false, false)
+        .filter(filter_array_elements(tcx, query.typing_env))
+        .next()
+        .is_some();
+
+    debug!("needs_drop_raw({:?}) = {:?}", query, res);
+    res
+}
+
+/// HACK: in order to not mistakenly assume that `[PhantomData<T>; N]` requires drop glue
+/// we check the element type for drop glue. The correct fix would be looking at the
+/// entirety of the code around `needs_drop_components` and this file and come up with
+/// logic that is easier to follow while not repeating any checks that may thus diverge.
+fn filter_array_elements<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
+) -> impl Fn(&Result<Ty<'tcx>, AlwaysRequiresDrop>) -> bool {
+    move |ty| match ty {
+        Ok(ty) => match *ty.kind() {
+            ty::Array(elem, _) => tcx.needs_drop_raw(typing_env.as_query_input(elem)),
+            _ => true,
+        },
+        Err(AlwaysRequiresDrop) => true,
+    }
+}
+
 fn has_significant_drop_raw<'tcx>(
     tcx: TyCtxt<'tcx>,
-    query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>,
+    query: ty::PseudoCanonicalInput<'tcx, Ty<'tcx>>,
 ) -> bool {
     let res = drop_tys_helper(
         tcx,
         query.value,
-        query.param_env,
+        query.typing_env,
         adt_consider_insignificant_dtor(tcx),
         true,
+        false,
     )
+    .filter(filter_array_elements(tcx, query.typing_env))
     .next()
     .is_some();
     debug!("has_significant_drop_raw({:?}) = {:?}", query, res);
@@ -45,7 +88,10 @@ fn has_significant_drop_raw<'tcx>(
 
 struct NeedsDropTypes<'tcx, F> {
     tcx: TyCtxt<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
+    /// Whether to reveal coroutine witnesses, this is set
+    /// to `false` unless we compute `needs_drop` for a coroutine witness.
+    reveal_coroutine_witnesses: bool,
     query_ty: Ty<'tcx>,
     seen_tys: FxHashSet<Ty<'tcx>>,
     /// A stack of types left to process, and the recursion depth when we
@@ -55,26 +101,39 @@ struct NeedsDropTypes<'tcx, F> {
     unchecked_tys: Vec<(Ty<'tcx>, usize)>,
     recursion_limit: Limit,
     adt_components: F,
+    /// Set this to true if an exhaustive list of types involved in
+    /// drop obligation is requested.
+    exhaustive: bool,
 }
 
 impl<'tcx, F> NeedsDropTypes<'tcx, F> {
     fn new(
         tcx: TyCtxt<'tcx>,
-        param_env: ty::ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
         ty: Ty<'tcx>,
+        exhaustive: bool,
         adt_components: F,
     ) -> Self {
         let mut seen_tys = FxHashSet::default();
         seen_tys.insert(ty);
         Self {
             tcx,
-            param_env,
+            typing_env,
+            reveal_coroutine_witnesses: exhaustive,
             seen_tys,
             query_ty: ty,
             unchecked_tys: vec![(ty, 0)],
             recursion_limit: tcx.recursion_limit(),
             adt_components,
+            exhaustive,
         }
+    }
+
+    /// Called when `ty` is found to always require drop.
+    /// If the exhaustive flag is true, then `Ok(ty)` is returned like any other type.
+    /// Otherwise, `Err(AlwaysRequireDrop)` is returned, which will cause iteration to abort.
+    fn always_drop_component(&self, ty: Ty<'tcx>) -> NeedsDropResult<Ty<'tcx>> {
+        if self.exhaustive { Ok(ty) } else { Err(AlwaysRequiresDrop) }
     }
 }
 
@@ -85,19 +144,22 @@ where
 {
     type Item = NeedsDropResult<Ty<'tcx>>;
 
+    #[instrument(level = "debug", skip(self), ret)]
     fn next(&mut self) -> Option<NeedsDropResult<Ty<'tcx>>> {
         let tcx = self.tcx;
 
         while let Some((ty, level)) = self.unchecked_tys.pop() {
+            debug!(?ty, "needs_drop_components: inspect");
             if !self.recursion_limit.value_within_limit(level) {
                 // Not having a `Span` isn't great. But there's hopefully some other
                 // recursion limit error as well.
-                tcx.sess.emit_err(NeedsDropOverflow { query_ty: self.query_ty });
-                return Some(Err(AlwaysRequiresDrop));
+                debug!("needs_drop_components: recursion limit exceeded");
+                tcx.dcx().emit_err(NeedsDropOverflow { query_ty: self.query_ty });
+                return Some(self.always_drop_component(ty));
             }
 
             let components = match needs_drop_components(tcx, ty) {
-                Err(e) => return Some(Err(e)),
+                Err(AlwaysRequiresDrop) => return Some(self.always_drop_component(ty)),
                 Ok(components) => components,
             };
             debug!("needs_drop_components({:?}) = {:?}", ty, components);
@@ -110,14 +172,42 @@ where
 
             for component in components {
                 match *component.kind() {
-                    // The information required to determine whether a generator has drop is
+                    // The information required to determine whether a coroutine has drop is
                     // computed on MIR, while this very method is used to build MIR.
-                    // To avoid cycles, we consider that generators always require drop.
-                    ty::Generator(..) if tcx.sess.opts.unstable_opts.drop_tracking_mir => {
-                        return Some(Err(AlwaysRequiresDrop));
+                    // To avoid cycles, we consider that coroutines always require drop.
+                    //
+                    // HACK: Because we erase regions contained in the coroutine witness, we
+                    // have to conservatively assume that every region captured by the
+                    // coroutine has to be live when dropped. This results in a lot of
+                    // undesirable borrowck errors. During borrowck, we call `needs_drop`
+                    // for the coroutine witness and check whether any of the contained types
+                    // need to be dropped, and only require the captured types to be live
+                    // if they do.
+                    ty::Coroutine(_, args) => {
+                        if self.reveal_coroutine_witnesses {
+                            queue_type(self, args.as_coroutine().witness());
+                        } else {
+                            return Some(self.always_drop_component(ty));
+                        }
+                    }
+                    ty::CoroutineWitness(def_id, args) => {
+                        if let Some(witness) = tcx.mir_coroutine_witnesses(def_id) {
+                            self.reveal_coroutine_witnesses = true;
+                            for field_ty in &witness.field_tys {
+                                queue_type(
+                                    self,
+                                    EarlyBinder::bind(field_ty.ty).instantiate(tcx, args),
+                                );
+                            }
+                        }
                     }
 
-                    _ if component.is_copy_modulo_regions(tcx, self.param_env) => (),
+                    ty::UnsafeBinder(bound_ty) => {
+                        let ty = self.tcx.instantiate_bound_regions_with_erased(bound_ty.into());
+                        queue_type(self, ty);
+                    }
+
+                    _ if tcx.type_is_copy_modulo_regions(self.typing_env, component) => {}
 
                     ty::Closure(_, args) => {
                         for upvar in args.as_closure().upvar_tys() {
@@ -125,26 +215,9 @@ where
                         }
                     }
 
-                    ty::Generator(def_id, args, _) => {
-                        let args = args.as_generator();
-                        for upvar in args.upvar_tys() {
+                    ty::CoroutineClosure(_, args) => {
+                        for upvar in args.as_coroutine_closure().upvar_tys() {
                             queue_type(self, upvar);
-                        }
-
-                        let witness = args.witness();
-                        let interior_tys = match witness.kind() {
-                            &ty::GeneratorWitness(tys) => tcx.erase_late_bound_regions(tys),
-                            _ => {
-                                tcx.sess.delay_span_bug(
-                                    tcx.hir().span_if_local(def_id).unwrap_or(DUMMY_SP),
-                                    format!("unexpected generator witness type {witness:?}"),
-                                );
-                                return Some(Err(AlwaysRequiresDrop));
-                            }
-                        };
-
-                        for interior_ty in interior_tys {
-                            queue_type(self, interior_ty);
                         }
                     }
 
@@ -153,12 +226,14 @@ where
                     // impl then check whether the field types need `Drop`.
                     ty::Adt(adt_def, args) => {
                         let tys = match (self.adt_components)(adt_def, args) {
-                            Err(e) => return Some(Err(e)),
+                            Err(AlwaysRequiresDrop) => {
+                                return Some(self.always_drop_component(ty));
+                            }
                             Ok(tys) => tys,
                         };
                         for required_ty in tys {
                             let required = tcx
-                                .try_normalize_erasing_regions(self.param_env, required_ty)
+                                .try_normalize_erasing_regions(self.typing_env, required_ty)
                                 .unwrap_or(required_ty);
 
                             queue_type(self, required);
@@ -178,7 +253,8 @@ where
                     }
 
                     ty::Foreign(_) | ty::Dynamic(..) => {
-                        return Some(Err(AlwaysRequiresDrop));
+                        debug!("needs_drop_components: foreign or dynamic");
+                        return Some(self.always_drop_component(ty));
                     }
 
                     ty::Bool
@@ -191,11 +267,10 @@ where
                     | ty::Ref(..)
                     | ty::RawPtr(..)
                     | ty::FnDef(..)
+                    | ty::Pat(..)
                     | ty::FnPtr(..)
                     | ty::Tuple(_)
                     | ty::Bound(..)
-                    | ty::GeneratorWitness(..)
-                    | ty::GeneratorWitnessMIR(..)
                     | ty::Never
                     | ty::Infer(_)
                     | ty::Error(_) => {
@@ -226,9 +301,10 @@ enum DtorType {
 fn drop_tys_helper<'tcx>(
     tcx: TyCtxt<'tcx>,
     ty: Ty<'tcx>,
-    param_env: rustc_middle::ty::ParamEnv<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
     adt_has_dtor: impl Fn(ty::AdtDef<'tcx>) -> Option<DtorType>,
     only_significant: bool,
+    exhaustive: bool,
 ) -> impl Iterator<Item = NeedsDropResult<Ty<'tcx>>> {
     fn with_query_cache<'tcx>(
         tcx: TyCtxt<'tcx>,
@@ -236,9 +312,9 @@ fn drop_tys_helper<'tcx>(
     ) -> NeedsDropResult<Vec<Ty<'tcx>>> {
         iter.into_iter().try_fold(Vec::new(), |mut vec, subty| {
             match subty.kind() {
-                ty::Adt(adt_id, subst) => {
+                ty::Adt(adt_id, args) => {
                     for subty in tcx.adt_drop_tys(adt_id.did())? {
-                        vec.push(EarlyBinder::bind(subty).instantiate(tcx, subst));
+                        vec.push(EarlyBinder::bind(subty).instantiate(tcx, args));
                     }
                 }
                 _ => vec.push(subty),
@@ -272,7 +348,10 @@ fn drop_tys_helper<'tcx>(
         } else {
             let field_tys = adt_def.all_fields().map(|field| {
                 let r = tcx.type_of(field.did).instantiate(tcx, args);
-                debug!("drop_tys_helper: Subst into {:?} with {:?} getting {:?}", field, args, r);
+                debug!(
+                    "drop_tys_helper: Instantiate into {:?} with {:?} getting {:?}",
+                    field, args, r
+                );
                 r
             });
             if only_significant {
@@ -289,7 +368,7 @@ fn drop_tys_helper<'tcx>(
         .map(|v| v.into_iter())
     };
 
-    NeedsDropTypes::new(tcx, param_env, ty, adt_components)
+    NeedsDropTypes::new(tcx, typing_env, ty, exhaustive, adt_components)
 }
 
 fn adt_consider_insignificant_dtor<'tcx>(
@@ -318,7 +397,7 @@ fn adt_consider_insignificant_dtor<'tcx>(
 fn adt_drop_tys<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: DefId,
-) -> Result<&ty::List<Ty<'tcx>>, AlwaysRequiresDrop> {
+) -> Result<&'tcx ty::List<Ty<'tcx>>, AlwaysRequiresDrop> {
     // This is for the "adt_drop_tys" query, that considers all `Drop` impls, therefore all dtors are
     // significant.
     let adt_has_dtor =
@@ -327,15 +406,16 @@ fn adt_drop_tys<'tcx>(
     drop_tys_helper(
         tcx,
         tcx.type_of(def_id).instantiate_identity(),
-        tcx.param_env(def_id),
+        ty::TypingEnv::non_body_analysis(tcx, def_id),
         adt_has_dtor,
+        false,
         false,
     )
     .collect::<Result<Vec<_>, _>>()
     .map(|components| tcx.mk_type_list(&components))
 }
 // If `def_id` refers to a generic ADT, the queries above and below act as if they had been handed
-// a `tcx.make_ty(def, identity_args)` and as such it is legal to substitute the generic parameters
+// a `tcx.make_ty(def, identity_args)` and as such it is legal to instantiate the generic parameters
 // of the ADT into the outputted `ty`s.
 fn adt_significant_drop_tys(
     tcx: TyCtxt<'_>,
@@ -344,20 +424,42 @@ fn adt_significant_drop_tys(
     drop_tys_helper(
         tcx,
         tcx.type_of(def_id).instantiate_identity(), // identical to `tcx.make_adt(def, identity_args)`
-        tcx.param_env(def_id),
+        ty::TypingEnv::non_body_analysis(tcx, def_id),
         adt_consider_insignificant_dtor(tcx),
         true,
+        false,
     )
     .collect::<Result<Vec<_>, _>>()
     .map(|components| tcx.mk_type_list(&components))
 }
 
+#[instrument(level = "debug", skip(tcx), ret)]
+fn list_significant_drop_tys<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    key: ty::PseudoCanonicalInput<'tcx, Ty<'tcx>>,
+) -> &'tcx ty::List<Ty<'tcx>> {
+    tcx.mk_type_list(
+        &drop_tys_helper(
+            tcx,
+            key.value,
+            key.typing_env,
+            adt_consider_insignificant_dtor(tcx),
+            true,
+            true,
+        )
+        .filter_map(|res| res.ok())
+        .collect::<Vec<_>>(),
+    )
+}
+
 pub(crate) fn provide(providers: &mut Providers) {
     *providers = Providers {
         needs_drop_raw,
+        needs_async_drop_raw,
         has_significant_drop_raw,
         adt_drop_tys,
         adt_significant_drop_tys,
+        list_significant_drop_tys,
         ..*providers
     };
 }

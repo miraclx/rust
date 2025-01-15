@@ -1,4 +1,3 @@
-#![feature(raw_ref_op)]
 #![feature(core_intrinsics)]
 #![feature(custom_mir)]
 
@@ -11,7 +10,7 @@ pub fn main() {
         {
             let x = 0;
             let ptr = &raw mut x;
-            Call(*ptr = myfun(), after_call)
+            Call(*ptr = myfun(), ReturnTo(after_call), UnwindContinue())
         }
 
         after_call = {

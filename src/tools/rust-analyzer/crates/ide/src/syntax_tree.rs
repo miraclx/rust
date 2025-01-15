@@ -1,7 +1,5 @@
-use ide_db::{
-    base_db::{FileId, SourceDatabase},
-    RootDatabase,
-};
+use hir::Semantics;
+use ide_db::{FileId, RootDatabase};
 use syntax::{
     AstNode, NodeOrToken, SourceFile, SyntaxKind::STRING, SyntaxToken, TextRange, TextSize,
 };
@@ -22,9 +20,10 @@ pub(crate) fn syntax_tree(
     file_id: FileId,
     text_range: Option<TextRange>,
 ) -> String {
-    let parse = db.parse(file_id);
+    let sema = Semantics::new(db);
+    let parse = sema.parse_guess_edition(file_id);
     if let Some(text_range) = text_range {
-        let node = match parse.tree().syntax().covering_element(text_range) {
+        let node = match parse.syntax().covering_element(text_range) {
             NodeOrToken::Node(node) => node,
             NodeOrToken::Token(token) => {
                 if let Some(tree) = syntax_tree_for_string(&token, text_range) {
@@ -36,7 +35,7 @@ pub(crate) fn syntax_tree(
 
         format!("{node:#?}")
     } else {
-        format!("{:#?}", parse.tree().syntax())
+        format!("{:#?}", parse.syntax())
     }
 }
 
@@ -55,7 +54,7 @@ fn syntax_tree_for_string(token: &SyntaxToken, text_range: TextRange) -> Option<
 fn syntax_tree_for_token(node: &SyntaxToken, text_range: TextRange) -> Option<String> {
     // Range of the full node
     let node_range = node.text_range();
-    let text = node.text().to_string();
+    let text = node.text().to_owned();
 
     // We start at some point inside the node
     // Either we have selected the whole string
@@ -66,8 +65,6 @@ fn syntax_tree_for_token(node: &SyntaxToken, text_range: TextRange) -> Option<St
     let len = text_range.len();
 
     let node_len = node_range.len();
-
-    let start = start;
 
     // We want to cap our length
     let len = len.min(node_len);
@@ -90,7 +87,7 @@ fn syntax_tree_for_token(node: &SyntaxToken, text_range: TextRange) -> Option<St
         // Remove custom markers
         .replace("$0", "");
 
-    let parsed = SourceFile::parse(&text);
+    let parsed = SourceFile::parse(&text, span::Edition::CURRENT_FIXME);
 
     // If the "file" parsed without errors,
     // return its syntax

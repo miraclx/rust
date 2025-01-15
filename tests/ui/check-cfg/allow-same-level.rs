@@ -1,7 +1,8 @@
 // This test check that #[allow(unexpected_cfgs)] doesn't work if put on the same level
 //
-// check-pass
-// compile-flags:--check-cfg=names() -Z unstable-options
+//@ check-pass
+//@ no-auto-check-cfg
+//@ compile-flags: --check-cfg=cfg()
 
 #[allow(unexpected_cfgs)]
 #[cfg(FALSE)]

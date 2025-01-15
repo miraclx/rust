@@ -4,24 +4,17 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-# Use optional dependencies for rustc_* in order to support building this crate separately.
-rustc_hir = { path = "../rustc_hir", optional = true }
-rustc_middle = { path = "../rustc_middle", optional = true }
-rustc_span = { path = "../rustc_span", optional = true }
-rustc_target = { path = "../rustc_target", optional = true }
-rustc_driver = { path = "../rustc_driver", optional = true }
-rustc_interface = { path = "../rustc_interface", optional = true}
-rustc_session = {path = "../rustc_session", optional = true}
-tracing = "0.1"
+# tidy-alphabetical-start
+rustc_abi = { path = "../rustc_abi" }
+rustc_ast = { path = "../rustc_ast" }
+rustc_data_structures = { path = "../rustc_data_structures" }
+rustc_hir = { path = "../rustc_hir" }
+rustc_hir_pretty = { path = "../rustc_hir_pretty" }
+rustc_middle = { path = "../rustc_middle" }
+rustc_session = { path = "../rustc_session" }
+rustc_span = { path = "../rustc_span" }
+rustc_target = { path = "../rustc_target" }
 scoped-tls = "1.0"
-
-[features]
-default = [
-    "rustc_hir",
-    "rustc_middle",
-    "rustc_span",
-    "rustc_target",
-    "rustc_driver",
-    "rustc_interface",
-    "rustc_session",
-]
+stable_mir = {path = "../stable_mir" }
+tracing = "0.1"
+# tidy-alphabetical-end

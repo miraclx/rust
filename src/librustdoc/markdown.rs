@@ -1,18 +1,24 @@
+//! Standalone markdown rendering.
+//!
+//! For the (much more common) case of rendering markdown in doc-comments, see
+//! [crate::html::markdown].
+//!
+//! This is used when [rendering a markdown file to an html file][docs], without processing
+//! rust source code.
+//!
+//! [docs]: https://doc.rust-lang.org/stable/rustdoc/#using-standalone-markdown-files
+
 use std::fmt::Write as _;
-use std::fs::{create_dir_all, read_to_string, File};
+use std::fs::{File, create_dir_all, read_to_string};
 use std::io::prelude::*;
 use std::path::Path;
 
 use rustc_span::edition::Edition;
-use rustc_span::source_map::DUMMY_SP;
 
-use crate::config::{Options, RenderOptions};
-use crate::doctest::{Collector, GlobalTestOptions};
+use crate::config::RenderOptions;
 use crate::html::escape::Escape;
 use crate::html::markdown;
-use crate::html::markdown::{
-    find_testable_code, ErrorCodes, HeadingOffset, IdMap, Markdown, MarkdownWithToc,
-};
+use crate::html::markdown::{ErrorCodes, HeadingOffset, IdMap, Markdown, MarkdownWithToc};
 
 /// Separate any lines at the start of the file that begin with `# ` or `%`.
 fn extract_leading_metadata(s: &str) -> (Vec<&str>, &str) {
@@ -37,7 +43,7 @@ fn extract_leading_metadata(s: &str) -> (Vec<&str>, &str) {
 /// (e.g., output = "bar" => "bar/foo.html").
 ///
 /// Requires session globals to be available, for symbol interning.
-pub(crate) fn render<P: AsRef<Path>>(
+pub(crate) fn render_and_write<P: AsRef<Path>>(
     input: P,
     options: RenderOptions,
     edition: Edition,
@@ -76,6 +82,7 @@ pub(crate) fn render<P: AsRef<Path>>(
     let text = if !options.markdown_no_toc {
         MarkdownWithToc {
             content: text,
+            links: &[],
             ids: &mut ids,
             error_codes,
             edition,
@@ -134,28 +141,4 @@ pub(crate) fn render<P: AsRef<Path>>(
         Err(e) => Err(format!("cannot write to `{output}`: {e}", output = output.display())),
         Ok(_) => Ok(()),
     }
-}
-
-/// Runs any tests/code examples in the markdown file `input`.
-pub(crate) fn test(options: Options) -> Result<(), String> {
-    let input_str = read_to_string(&options.input)
-        .map_err(|err| format!("{input}: {err}", input = options.input.display()))?;
-    let mut opts = GlobalTestOptions::default();
-    opts.no_crate_inject = true;
-    let mut collector = Collector::new(
-        options.input.display().to_string(),
-        options.clone(),
-        true,
-        opts,
-        None,
-        Some(options.input),
-        options.enable_per_target_ignores,
-    );
-    collector.set_position(DUMMY_SP);
-    let codes = ErrorCodes::from(options.unstable_features.is_nightly_build());
-
-    find_testable_code(&input_str, &mut collector, codes, options.enable_per_target_ignores, None);
-
-    crate::doctest::run_tests(options.test_args, options.nocapture, collector.tests);
-    Ok(())
 }

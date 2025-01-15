@@ -479,3 +479,29 @@ fn ascii_ctype_const() {
         is_ascii_control      => [false, false, false, false, false];
     }
 }
+
+#[test]
+fn test_escape_ascii() {
+    let mut buf = [0u8; 0x1F + 7]; // 0..=0x1F plus two quotes, slash, \x7F, \x80, \xFF
+    for idx in 0..=0x1F {
+        buf[idx] = idx as u8;
+    }
+    buf[0x20] = b'\'';
+    buf[0x21] = b'"';
+    buf[0x22] = b'\\';
+    buf[0x23] = 0x7F;
+    buf[0x24] = 0x80;
+    buf[0x25] = 0xff;
+    assert_eq!(
+        buf.escape_ascii().to_string(),
+        r#"\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\x0c\r\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\'\"\\\x7f\x80\xff"#
+    );
+}
+
+#[test]
+fn test_escape_ascii_iter() {
+    let mut it = b"\0fastpath\xffremainder\xff".escape_ascii();
+    let _ = it.advance_by(4);
+    let _ = it.advance_back_by(4);
+    assert_eq!(it.to_string(), r#"fastpath\xffremainder"#);
+}

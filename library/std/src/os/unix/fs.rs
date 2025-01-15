@@ -4,18 +4,18 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use super::platform::fs::MetadataExt as _;
-use crate::fs::{self, OpenOptions, Permissions};
-use crate::io;
-use crate::os::unix::io::{AsFd, AsRawFd};
-use crate::path::Path;
-use crate::sys;
-use crate::sys_common::{AsInner, AsInnerMut, FromInner};
-// Used for `File::read` on intra-doc links
-use crate::ffi::OsStr;
-use crate::sealed::Sealed;
 #[allow(unused_imports)]
 use io::{Read, Write};
+
+use super::platform::fs::MetadataExt as _;
+// Used for `File::read` on intra-doc links
+use crate::ffi::OsStr;
+use crate::fs::{self, OpenOptions, Permissions};
+use crate::os::unix::io::{AsFd, AsRawFd};
+use crate::path::Path;
+use crate::sealed::Sealed;
+use crate::sys_common::{AsInner, AsInnerMut, FromInner};
+use crate::{io, sys};
 
 // Tests for this module
 #[cfg(test)]
@@ -68,7 +68,7 @@ pub trait FileExt {
         io::default_read_vectored(|b| self.read_at(b, offset), bufs)
     }
 
-    /// Reads the exact number of byte required to fill `buf` from the given offset.
+    /// Reads the exact number of bytes required to fill `buf` from the given offset.
     ///
     /// The offset is relative to the start of the file and thus independent
     /// from the current cursor.
@@ -123,15 +123,11 @@ pub trait FileExt {
                     buf = &mut tmp[n..];
                     offset += n as u64;
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(ref e) if e.is_interrupted() => {}
                 Err(e) => return Err(e),
             }
         }
-        if !buf.is_empty() {
-            Err(io::const_io_error!(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer",))
-        } else {
-            Ok(())
-        }
+        if !buf.is_empty() { Err(io::Error::READ_EXACT_EOF) } else { Ok(()) }
     }
 
     /// Writes a number of bytes starting from a given offset.
@@ -155,9 +151,9 @@ pub trait FileExt {
     /// flag fail to respect the offset parameter, always appending to the end
     /// of the file instead.
     ///
-    /// It is possible to inadvertantly set this flag, like in the example below.
+    /// It is possible to inadvertently set this flag, like in the example below.
     /// Therefore, it is important to be vigilant while changing options to mitigate
-    /// unexpected behaviour.
+    /// unexpected behavior.
     ///
     /// ```no_run
     /// use std::fs::File;
@@ -249,16 +245,13 @@ pub trait FileExt {
         while !buf.is_empty() {
             match self.write_at(buf, offset) {
                 Ok(0) => {
-                    return Err(io::const_io_error!(
-                        io::ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
+                    return Err(io::Error::WRITE_ALL_EOF);
                 }
                 Ok(n) => {
                     buf = &buf[n..];
                     offset += n as u64
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(ref e) if e.is_interrupted() => {}
                 Err(e) => return Err(e),
             }
         }
@@ -341,6 +334,7 @@ pub trait PermissionsExt {
     /// assert_eq!(permissions.mode(), 0o644);
     /// ```
     #[stable(feature = "fs_ext", since = "1.1.0")]
+    #[cfg_attr(not(test), rustc_diagnostic_item = "permissions_from_mode")]
     fn from_mode(mode: u32) -> Self;
 }
 
@@ -397,7 +391,6 @@ pub trait OpenOptionsExt {
     ///
     /// ```no_run
     /// # #![feature(rustc_private)]
-    /// use libc;
     /// use std::fs::OpenOptions;
     /// use std::os::unix::fs::OpenOptionsExt;
     ///
@@ -994,6 +987,11 @@ impl DirBuilderExt for fs::DirBuilder {
 /// Changing the group typically requires either being the owner and a member of the group, or
 /// having privileges.
 ///
+/// Be aware that changing owner clears the `suid` and `sgid` permission bits in most cases
+/// according to POSIX, usually even if the user is root. The sgid is not cleared when
+/// the file is non-group-executable. See: <https://www.man7.org/linux/man-pages/man2/chown.2.html>
+/// This call may also clear file capabilities, if there was any.
+///
 /// If called on a symbolic link, this will change the owner and group of the link target. To
 /// change the owner and group of the link itself, see [`lchown`].
 ///
@@ -1072,7 +1070,7 @@ pub fn lchown<P: AsRef<Path>>(dir: P, uid: Option<u32>, gid: Option<u32>) -> io:
 /// }
 /// ```
 #[stable(feature = "unix_chroot", since = "1.56.0")]
-#[cfg(not(any(target_os = "fuchsia", target_os = "vxworks")))]
+#[cfg(not(target_os = "fuchsia"))]
 pub fn chroot<P: AsRef<Path>>(dir: P) -> io::Result<()> {
     sys::fs::chroot(dir.as_ref())
 }

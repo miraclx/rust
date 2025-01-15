@@ -1,4 +1,4 @@
-use std::future::{join, Future};
+use std::future::{Future, join};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake};
@@ -56,7 +56,7 @@ fn test_join() {
 
         let y = String::new();
         let x = join!(async {
-            println!("{}", &y);
+            println!("{y}");
             1
         })
         .await;

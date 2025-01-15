@@ -1,6 +1,4 @@
-PRINT-BANG INPUT (DISPLAY): foo! { #[fake_attr] mod bar {
-    #![doc = r" Foo"]
-} }
+PRINT-BANG INPUT (DISPLAY): foo! { #[fake_attr] mod bar { #![doc = r" Foo"] } }
 PRINT-BANG DEEP-RE-COLLECTED (DISPLAY): foo! { #[fake_attr] mod bar { #! [doc = r" Foo"] } }
 PRINT-BANG INPUT (DEBUG): TokenStream [
     Ident {
@@ -46,7 +44,7 @@ PRINT-BANG INPUT (DEBUG): TokenStream [
                         stream: TokenStream [
                             Punct {
                                 ch: '#',
-                                spacing: Alone,
+                                spacing: Joint,
                                 span: $DIR/issue-78675-captured-inner-attrs.rs:28:9: 28:16 (#0),
                             },
                             Punct {

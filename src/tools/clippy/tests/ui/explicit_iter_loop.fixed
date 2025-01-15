@@ -4,7 +4,9 @@
     clippy::similar_names,
     clippy::needless_borrow,
     clippy::deref_addrof,
-    dead_code
+    clippy::unnecessary_mut_passed,
+    dead_code,
+    non_local_definitions
 )]
 
 use core::slice;
@@ -20,15 +22,15 @@ fn main() {
     for _ in rvec {}
 
     let rmvec = &mut vec;
-    for _ in &*rmvec {}
-    for _ in &mut *rmvec {}
+    for _ in rmvec.iter() {}
+    for _ in rmvec.iter_mut() {}
 
     for _ in &vec {} // these are fine
     for _ in &mut vec {} // these are fine
 
     for _ in &[1, 2, 3] {}
 
-    for _ in &*(&mut [1, 2, 3]) {}
+    for _ in (&mut [1, 2, 3]).iter() {}
 
     for _ in &[0; 32] {}
     for _ in &[0; 33] {}
@@ -150,4 +152,16 @@ fn main() {
 
     let r = &x;
     for _ in r {}
+}
+
+#[clippy::msrv = "1.79"]
+pub fn issue_13184() {
+    // https://github.com/rust-lang/rust-clippy/issues/13184
+    // No need to fix, as IntoIterator for Box is valid starting from 1.80
+    let mut values: Box<[u32]> = Box::new([1, 2]);
+    for _ in values.iter() {}
+    for _ in values.iter_mut() {}
+
+    let rvalues = &values;
+    for _ in rvalues.iter() {}
 }

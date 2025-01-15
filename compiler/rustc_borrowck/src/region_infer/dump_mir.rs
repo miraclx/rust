@@ -1,15 +1,15 @@
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
 //! As part of generating the regions, if you enable `-Zdump-mir=nll`,
 //! we will generate an annotated copy of the MIR that includes the
 //! state of region inference. This code handles emitting the region
 //! context internal state.
 
-use super::{OutlivesConstraint, RegionInferenceContext};
-use crate::type_check::Locations;
+use std::io::{self, Write};
+
 use rustc_infer::infer::NllRegionVariableOrigin;
 use rustc_middle::ty::TyCtxt;
-use std::io::{self, Write};
+
+use super::{OutlivesConstraint, RegionInferenceContext};
+use crate::type_check::Locations;
 
 // Room for "'_#NNNNr" before things get misaligned.
 // Easy enough to fix if this ever doesn't seem like
@@ -23,7 +23,8 @@ impl<'tcx> RegionInferenceContext<'tcx> {
 
         for region in self.regions() {
             if let NllRegionVariableOrigin::FreeRegion = self.definitions[region].origin {
-                let classification = self.universal_regions.region_classification(region).unwrap();
+                let classification =
+                    self.universal_regions().region_classification(region).unwrap();
                 let outlived_by = self.universal_region_relations.regions_outlived_by(region);
                 writeln!(
                     out,
@@ -67,7 +68,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         with_msg: &mut dyn FnMut(&str) -> io::Result<()>,
     ) -> io::Result<()> {
         for region in self.definitions.indices() {
-            let value = self.liveness_constraints.region_value_str(region);
+            let value = self.liveness_constraints.pretty_print_live_points(region);
             if value != "{}" {
                 with_msg(&format!("{region:?} live at {value}"))?;
             }

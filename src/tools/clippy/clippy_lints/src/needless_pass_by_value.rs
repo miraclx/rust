@@ -1,27 +1,24 @@
-use clippy_utils::diagnostics::{multispan_sugg, span_lint_and_then};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::is_self;
 use clippy_utils::ptr::get_spans;
-use clippy_utils::source::{snippet, snippet_opt};
+use clippy_utils::source::{SpanRangeExt, snippet};
 use clippy_utils::ty::{
     implements_trait, implements_trait_with_env_from_iter, is_copy, is_type_diagnostic_item, is_type_lang_item,
 };
-use clippy_utils::{get_trait_def_id, is_self, paths};
-use if_chain::if_chain;
-use rustc_ast::ast::Attribute;
-use rustc_errors::{Applicability, Diagnostic};
+use rustc_errors::{Applicability, Diag};
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{
-    BindingAnnotation, Body, FnDecl, GenericArg, HirId, HirIdSet, Impl, ItemKind, LangItem, Mutability, Node, PatKind,
-    QPath, TyKind,
+    Attribute, BindingMode, Body, FnDecl, GenericArg, HirId, HirIdSet, Impl, ItemKind, LangItem, Mutability, Node,
+    PatKind, QPath, TyKind,
 };
 use rustc_hir_typeck::expr_use_visitor as euv;
-use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::mir::FakeReadCause;
 use rustc_middle::ty::{self, Ty, TypeVisitableExt};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::symbol::kw;
-use rustc_span::{sym, Span};
+use rustc_span::{Span, sym};
 use rustc_target::spec::abi::Abi;
 use rustc_trait_selection::traits;
 use rustc_trait_selection::traits::misc::type_allowed_to_implement_copy;
@@ -43,13 +40,13 @@ declare_clippy_lint! {
     /// (by using `Borrow` trait, for example), depending on how the function is used.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn foo(v: Vec<i32>) {
     ///     assert_eq!(v.len(), 42);
     /// }
     /// ```
     /// should be
-    /// ```rust
+    /// ```no_run
     /// fn foo(v: &[i32]) {
     ///     assert_eq!(v.len(), 42);
     /// }
@@ -87,7 +84,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
             return;
         }
 
-        let hir_id = cx.tcx.hir().local_def_id_to_hir_id(fn_def_id);
+        let hir_id = cx.tcx.local_def_id_to_hir_id(fn_def_id);
 
         match kind {
             FnKind::ItemFn(.., header) => {
@@ -101,7 +98,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
         }
 
         // Exclude non-inherent impls
-        if let Some(Node::Item(item)) = cx.tcx.hir().find_parent(hir_id) {
+        if let Node::Item(item) = cx.tcx.parent_hir_node(hir_id) {
             if matches!(
                 item.kind,
                 ItemKind::Impl(Impl { of_trait: Some(_), .. }) | ItemKind::Trait(..)
@@ -115,7 +112,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
             need!(cx.tcx.lang_items().fn_trait()),
             need!(cx.tcx.lang_items().fn_once_trait()),
             need!(cx.tcx.lang_items().fn_mut_trait()),
-            need!(get_trait_def_id(cx, &paths::RANGE_ARGUMENT_TRAIT)),
+            need!(cx.tcx.get_diagnostic_item(sym::RangeBounds)),
         ];
 
         let sized_trait = need!(cx.tcx.lang_items().sized_trait());
@@ -131,12 +128,13 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
             })
             .collect::<Vec<_>>();
 
-        // Collect moved variables and spans which will need dereferencings from the
+        // Collect moved variables and spans which will need dereferencing from the
         // function body.
         let MovedVariablesCtxt { moved_vars } = {
             let mut ctx = MovedVariablesCtxt::default();
-            let infcx = cx.tcx.infer_ctxt().build();
-            euv::ExprUseVisitor::new(&mut ctx, &infcx, fn_def_id, cx.param_env, cx.typeck_results()).consume_body(body);
+            euv::ExprUseVisitor::for_clippy(cx, fn_def_id, &mut ctx)
+                .consume_body(body)
+                .into_ok();
             ctx
         };
 
@@ -149,12 +147,13 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
                 return;
             }
 
-            // Ignore `self`s.
-            if idx == 0 {
-                if let PatKind::Binding(.., ident, _) = arg.pat.kind {
-                    if ident.name == kw::SelfLower {
-                        continue;
-                    }
+            // Ignore `self`s and params whose variable name starts with an underscore
+            if let PatKind::Binding(.., ident, _) = arg.pat.kind {
+                if idx == 0 && ident.name == kw::SelfLower {
+                    continue;
+                }
+                if ident.name.as_str().starts_with('_') {
+                    continue;
                 }
             }
 
@@ -177,118 +176,119 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
                 )
             };
 
-            if_chain! {
-                if !is_self(arg);
-                if !ty.is_mutable_ptr();
-                if !is_copy(cx, ty);
-                if ty.is_sized(cx.tcx, cx.param_env);
-                if !allowed_traits.iter().any(|&t| implements_trait_with_env_from_iter(
-                    cx.tcx,
-                    cx.param_env,
-                    ty,
-                    t,
-                    [Option::<ty::GenericArg<'tcx>>::None],
-                ));
-                if !implements_borrow_trait;
-                if !all_borrowable_trait;
-
-                if let PatKind::Binding(BindingAnnotation(_, Mutability::Not), canonical_id, ..) = arg.pat.kind;
-                if !moved_vars.contains(&canonical_id);
-                then {
-                    // Dereference suggestion
-                    let sugg = |diag: &mut Diagnostic| {
-                        if let ty::Adt(def, ..) = ty.kind() {
-                            if let Some(span) = cx.tcx.hir().span_if_local(def.did()) {
-                                if type_allowed_to_implement_copy(
-                                    cx.tcx,
-                                    cx.param_env,
-                                    ty,
-                                    traits::ObligationCause::dummy_with_span(span),
-                                ).is_ok() {
-                                    diag.span_help(span, "consider marking this type as `Copy`");
-                                }
+            if !is_self(arg)
+                && !ty.is_mutable_ptr()
+                && !is_copy(cx, ty)
+                && ty.is_sized(cx.tcx, cx.typing_env())
+                && !allowed_traits.iter().any(|&t| {
+                    implements_trait_with_env_from_iter(cx.tcx, cx.typing_env(), ty, t, None, [None::<
+                        ty::GenericArg<'tcx>,
+                    >])
+                })
+                && !implements_borrow_trait
+                && !all_borrowable_trait
+                && let PatKind::Binding(BindingMode(_, Mutability::Not), canonical_id, ..) = arg.pat.kind
+                && !moved_vars.contains(&canonical_id)
+            {
+                // Dereference suggestion
+                let sugg = |diag: &mut Diag<'_, ()>| {
+                    if let ty::Adt(def, ..) = ty.kind() {
+                        if let Some(span) = cx.tcx.hir().span_if_local(def.did()) {
+                            if type_allowed_to_implement_copy(
+                                cx.tcx,
+                                cx.param_env,
+                                ty,
+                                traits::ObligationCause::dummy_with_span(span),
+                                rustc_hir::Safety::Safe,
+                            )
+                            .is_ok()
+                            {
+                                diag.span_help(span, "or consider marking this type as `Copy`");
                             }
                         }
+                    }
 
-                        if_chain! {
-                            if is_type_diagnostic_item(cx, ty, sym::Vec);
-                            if let Some(clone_spans) =
-                                get_spans(cx, Some(body.id()), idx, &[("clone", ".to_owned()")]);
-                            if let TyKind::Path(QPath::Resolved(_, path)) = input.kind;
-                            if let Some(elem_ty) = path.segments.iter()
-                                .find(|seg| seg.ident.name == sym::Vec)
-                                .and_then(|ps| ps.args.as_ref())
-                                .map(|params| params.args.iter().find_map(|arg| match arg {
-                                    GenericArg::Type(ty) => Some(ty),
-                                    _ => None,
-                                }).unwrap());
-                            then {
-                                let slice_ty = format!("&[{}]", snippet(cx, elem_ty.span, "_"));
+                    if is_type_diagnostic_item(cx, ty, sym::Vec)
+                        && let Some(clone_spans) = get_spans(cx, Some(body.id()), idx, &[("clone", ".to_owned()")])
+                        && let TyKind::Path(QPath::Resolved(_, path)) = input.kind
+                        && let Some(elem_ty) = path
+                            .segments
+                            .iter()
+                            .find(|seg| seg.ident.name == sym::Vec)
+                            .and_then(|ps| ps.args.as_ref())
+                            .map(|params| {
+                                params
+                                    .args
+                                    .iter()
+                                    .find_map(|arg| match arg {
+                                        GenericArg::Type(ty) => Some(ty),
+                                        _ => None,
+                                    })
+                                    .unwrap()
+                            })
+                    {
+                        let slice_ty = format!("&[{}]", snippet(cx, elem_ty.span, "_"));
+                        diag.span_suggestion(
+                            input.span,
+                            "consider changing the type to",
+                            slice_ty,
+                            Applicability::Unspecified,
+                        );
+
+                        for (span, suggestion) in clone_spans {
+                            diag.span_suggestion(
+                                span,
+                                span.get_source_text(cx)
+                                    .map_or("change the call to".to_owned(), |src| format!("change `{src}` to")),
+                                suggestion,
+                                Applicability::Unspecified,
+                            );
+                        }
+
+                        // cannot be destructured, no need for `*` suggestion
+                        return;
+                    }
+
+                    if is_type_lang_item(cx, ty, LangItem::String) {
+                        if let Some(clone_spans) =
+                            get_spans(cx, Some(body.id()), idx, &[("clone", ".to_string()"), ("as_str", "")])
+                        {
+                            diag.span_suggestion(
+                                input.span,
+                                "consider changing the type to",
+                                "&str",
+                                Applicability::Unspecified,
+                            );
+
+                            for (span, suggestion) in clone_spans {
                                 diag.span_suggestion(
-                                    input.span,
-                                    "consider changing the type to",
-                                    slice_ty,
+                                    span,
+                                    span.get_source_text(cx)
+                                        .map_or("change the call to".to_owned(), |src| format!("change `{src}` to")),
+                                    suggestion,
                                     Applicability::Unspecified,
                                 );
-
-                                for (span, suggestion) in clone_spans {
-                                    diag.span_suggestion(
-                                        span,
-                                        snippet_opt(cx, span)
-                                            .map_or(
-                                                "change the call to".into(),
-                                                |x| format!("change `{x}` to"),
-                                            ),
-                                        suggestion,
-                                        Applicability::Unspecified,
-                                    );
-                                }
-
-                                // cannot be destructured, no need for `*` suggestion
-                                return;
                             }
+
+                            return;
                         }
+                    }
 
-                        if is_type_lang_item(cx, ty, LangItem::String) {
-                            if let Some(clone_spans) =
-                                get_spans(cx, Some(body.id()), idx, &[("clone", ".to_string()"), ("as_str", "")]) {
-                                diag.span_suggestion(
-                                    input.span,
-                                    "consider changing the type to",
-                                    "&str",
-                                    Applicability::Unspecified,
-                                );
-
-                                for (span, suggestion) in clone_spans {
-                                    diag.span_suggestion(
-                                        span,
-                                        snippet_opt(cx, span)
-                                            .map_or(
-                                                "change the call to".into(),
-                                                |x| format!("change `{x}` to")
-                                            ),
-                                        suggestion,
-                                        Applicability::Unspecified,
-                                    );
-                                }
-
-                                return;
-                            }
-                        }
-
-                        let spans = vec![(input.span, format!("&{}", snippet(cx, input.span, "_")))];
-
-                        multispan_sugg(diag, "consider taking a reference instead", spans);
-                    };
-
-                    span_lint_and_then(
-                        cx,
-                        NEEDLESS_PASS_BY_VALUE,
+                    diag.span_suggestion(
                         input.span,
-                        "this argument is passed by value, but not consumed in the function body",
-                        sugg,
+                        "consider taking a reference instead",
+                        format!("&{}", snippet(cx, input.span, "_")),
+                        Applicability::MaybeIncorrect,
                     );
-                }
+                };
+
+                span_lint_and_then(
+                    cx,
+                    NEEDLESS_PASS_BY_VALUE,
+                    input.span,
+                    "this argument is passed by value, but not consumed in the function body",
+                    sugg,
+                );
             }
         }
     }

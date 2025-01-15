@@ -1,10 +1,13 @@
 // wasm32 does not support benches (no time).
 #![cfg(not(target_arch = "wasm32"))]
+// Disabling in Miri as these would take too long.
+#![cfg(not(miri))]
 #![feature(flt2dec)]
 #![feature(test)]
 #![feature(trusted_random_access)]
 #![feature(iter_array_chunks)]
 #![feature(iter_next_chunk)]
+#![feature(iter_advance_by)]
 
 extern crate test;
 
@@ -15,6 +18,7 @@ mod char;
 mod fmt;
 mod hash;
 mod iter;
+mod net;
 mod num;
 mod ops;
 mod pattern;

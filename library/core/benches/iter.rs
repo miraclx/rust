@@ -3,7 +3,8 @@ use core::iter::*;
 use core::mem;
 use core::num::Wrapping;
 use core::ops::Range;
-use test::{black_box, Bencher};
+
+use test::{Bencher, black_box};
 
 #[bench]
 fn bench_rposition(b: &mut Bencher) {
@@ -388,6 +389,19 @@ fn bench_skip_then_zip(b: &mut Bencher) {
             .map(|(a, b)| *a + *b)
             .sum::<u64>();
         assert_eq!(s, 2009900);
+    });
+}
+
+#[bench]
+fn bench_skip_trusted_random_access(b: &mut Bencher) {
+    let v: Vec<u64> = black_box(vec![42; 10000]);
+    let mut sink = [0; 10000];
+
+    b.iter(|| {
+        for (val, idx) in v.iter().skip(8).zip(0..10000) {
+            sink[idx] += val;
+        }
+        sink
     });
 }
 

@@ -58,14 +58,13 @@
 use std::fmt;
 use std::io::Write;
 
-use cranelift_codegen::{
-    entity::SecondaryMap,
-    ir::entities::AnyEntity,
-    write::{FuncWriter, PlainWriter},
-};
-
-use rustc_middle::ty::layout::FnAbiOf;
+use cranelift_codegen::entity::SecondaryMap;
+use cranelift_codegen::ir::Fact;
+use cranelift_codegen::ir::entities::AnyEntity;
+use cranelift_codegen::write::{FuncWriter, PlainWriter};
+use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_session::config::{OutputFilenames, OutputType};
+use rustc_target::callconv::FnAbi;
 
 use crate::prelude::*;
 
@@ -77,18 +76,21 @@ pub(crate) struct CommentWriter {
 }
 
 impl CommentWriter {
-    pub(crate) fn new<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> Self {
+    pub(crate) fn new<'tcx>(
+        tcx: TyCtxt<'tcx>,
+        instance: Instance<'tcx>,
+        fn_abi: &'tcx FnAbi<'tcx, Ty<'tcx>>,
+    ) -> Self {
         let enabled = should_write_ir(tcx);
         let global_comments = if enabled {
-            vec![
-                format!("symbol {}", tcx.symbol_name(instance).name),
-                format!("instance {:?}", instance),
-                format!(
-                    "abi {:?}",
-                    RevealAllLayoutCx(tcx).fn_abi_of_instance(instance, ty::List::empty())
-                ),
-                String::new(),
-            ]
+            with_no_trimmed_paths!({
+                vec![
+                    format!("symbol {}", tcx.symbol_name(instance).name),
+                    format!("instance {:?}", instance),
+                    format!("abi {:?}", fn_abi),
+                    String::new(),
+                ]
+            })
         } else {
             vec![]
         };
@@ -153,8 +155,13 @@ impl FuncWriter for &'_ CommentWriter {
         _func: &Function,
         entity: AnyEntity,
         value: &dyn fmt::Display,
+        maybe_fact: Option<&Fact>,
     ) -> fmt::Result {
-        write!(w, "    {} = {}", entity, value)?;
+        if let Some(fact) = maybe_fact {
+            write!(w, "    {} ! {} = {}", entity, fact, value)?;
+        } else {
+            write!(w, "    {} = {}", entity, value)?;
+        }
 
         if let Some(comment) = self.entity_comments.get(&entity) {
             writeln!(w, " ; {}", comment.replace('\n', "\n; "))
@@ -225,9 +232,8 @@ pub(crate) fn write_ir_file(
     let res = std::fs::File::create(clif_file_name).and_then(|mut file| write(&mut file));
     if let Err(err) = res {
         // Using early_warn as no Session is available here
-        let handler = rustc_session::EarlyErrorHandler::new(
-            rustc_session::config::ErrorOutputType::default(),
-        );
+        let handler =
+            rustc_session::EarlyDiagCtxt::new(rustc_session::config::ErrorOutputType::default());
         handler.early_warn(format!("error writing ir file: {}", err));
     }
 }

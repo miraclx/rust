@@ -51,7 +51,7 @@ pub struct Empty;
 /// ```
 #[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_io_structs", issue = "78812")]
+#[rustc_const_stable(feature = "const_io_structs", since = "1.79.0")]
 pub const fn empty() -> Empty {
     Empty
 }
@@ -173,7 +173,7 @@ pub struct Repeat {
 /// ```
 #[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_io_structs", issue = "78812")]
+#[rustc_const_stable(feature = "const_io_structs", since = "1.79.0")]
 pub const fn repeat(byte: u8) -> Repeat {
     Repeat { byte }
 }
@@ -198,10 +198,20 @@ impl Read for Repeat {
 
         // SAFETY: the entire unfilled portion of buf has been initialized
         unsafe {
-            buf.advance(remaining);
+            buf.advance_unchecked(remaining);
         }
 
         Ok(())
+    }
+
+    /// This function is not supported by `io::Repeat`, because there's no end of its data
+    fn read_to_end(&mut self, _: &mut Vec<u8>) -> io::Result<usize> {
+        Err(io::Error::from(io::ErrorKind::OutOfMemory))
+    }
+
+    /// This function is not supported by `io::Repeat`, because there's no end of its data
+    fn read_to_string(&mut self, _: &mut String) -> io::Result<usize> {
+        Err(io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     #[inline]
@@ -266,7 +276,7 @@ pub struct Sink;
 /// ```
 #[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_io_structs", issue = "78812")]
+#[rustc_const_stable(feature = "const_io_structs", since = "1.79.0")]
 pub const fn sink() -> Sink {
     Sink
 }

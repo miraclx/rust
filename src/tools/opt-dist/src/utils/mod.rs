@@ -1,9 +1,14 @@
-pub mod io;
+use std::time::Duration;
+
+use humansize::BINARY;
+use sysinfo::Disks;
 
 use crate::environment::Environment;
-use crate::utils::io::{delete_directory, get_files_from_dir};
-use humansize::{format_size, BINARY};
-use sysinfo::{DiskExt, RefreshKind, System, SystemExt};
+use crate::timer::Timer;
+use crate::utils::io::delete_directory;
+
+pub mod artifact_size;
+pub mod io;
 
 pub fn format_env_variables() -> String {
     let vars = std::env::vars().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>();
@@ -11,9 +16,9 @@ pub fn format_env_variables() -> String {
 }
 
 pub fn print_free_disk_space() -> anyhow::Result<()> {
-    let sys = System::new_with_specifics(RefreshKind::default().with_disks_list().with_disks());
-    let available_space: u64 = sys.disks().iter().map(|d| d.available_space()).sum();
-    let total_space: u64 = sys.disks().iter().map(|d| d.total_space()).sum();
+    let disks = Disks::new_with_refreshed_list();
+    let available_space: u64 = disks.list().iter().map(|d| d.available_space()).sum();
+    let total_space: u64 = disks.list().iter().map(|d| d.total_space()).sum();
     let used_space = total_space - available_space;
 
     log::info!(
@@ -25,35 +30,31 @@ pub fn print_free_disk_space() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn print_binary_sizes(env: &dyn Environment) -> anyhow::Result<()> {
-    use std::fmt::Write;
-
-    let root = env.build_artifacts().join("stage2");
-
-    let mut files = get_files_from_dir(&root.join("bin"), None)?;
-    files.extend(get_files_from_dir(&root.join("lib"), Some(".so"))?);
-    files.sort_unstable();
-
-    let mut output = String::new();
-    for file in files {
-        let size = std::fs::metadata(file.as_std_path())?.len();
-        let size_formatted = format_size(size, BINARY);
-        let name = format!("{}:", file.file_name().unwrap());
-        writeln!(output, "{name:<50}{size_formatted:>10}")?;
-    }
-
-    log::info!("Rustc artifact size\n{output}");
-
-    Ok(())
-}
-
-pub fn clear_llvm_files(env: &dyn Environment) -> anyhow::Result<()> {
+pub fn clear_llvm_files(env: &Environment) -> anyhow::Result<()> {
     // Bootstrap currently doesn't support rebuilding LLVM when PGO options
     // change (or any other llvm-related options); so just clear out the relevant
     // directories ourselves.
     log::info!("Clearing LLVM build files");
     delete_directory(&env.build_artifacts().join("llvm"))?;
     delete_directory(&env.build_artifacts().join("lld"))?;
+    Ok(())
+}
+
+/// Write the formatted statistics of the timer to a Github Actions summary.
+pub fn write_timer_to_summary(path: &str, timer: &Timer) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let mut file = std::fs::File::options().append(true).create(true).open(path)?;
+    writeln!(
+        file,
+        r#"# Step durations
+
+```
+{}
+```
+"#,
+        timer.format_stats()
+    )?;
     Ok(())
 }
 
@@ -68,6 +69,24 @@ pub fn with_log_group<F: FnOnce() -> R, R>(group: &str, func: F) -> R {
     } else {
         func()
     }
+}
+
+#[allow(unused)]
+pub fn retry_action<F: Fn() -> anyhow::Result<R>, R>(
+    action: F,
+    name: &str,
+    count: u64,
+) -> anyhow::Result<R> {
+    for attempt in 0..count {
+        match action() {
+            Ok(result) => return Ok(result),
+            Err(error) => {
+                log::error!("Failed to perform action `{name}`, attempt #{attempt}: {error:?}");
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        }
+    }
+    Err(anyhow::anyhow!("Failed to perform action `{name}` after {count} retries"))
 }
 
 fn is_in_ci() -> bool {

@@ -7,7 +7,7 @@ use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind, Lit};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty::{self, Ty};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::symbol::Ident;
 
 declare_clippy_lint! {
@@ -18,13 +18,13 @@ declare_clippy_lint! {
     /// It is shorter to use the equivalent.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// assert_eq!("a".is_empty(), false);
     /// assert_ne!("a".is_empty(), true);
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// assert!(!"a".is_empty());
     /// ```
     #[clippy::version = "1.53.0"]
@@ -60,9 +60,9 @@ fn is_impl_not_trait_with_bool_out<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -
                 trait_id,
             )
         })
-        .map_or(false, |assoc_item| {
+        .is_some_and(|assoc_item| {
             let proj = Ty::new_projection(cx.tcx, assoc_item.def_id, cx.tcx.mk_args_trait(ty, []));
-            let nty = cx.tcx.normalize_erasing_regions(cx.param_env, proj);
+            let nty = cx.tcx.normalize_erasing_regions(cx.typing_env(), proj);
 
             nty.is_bool()
         })
@@ -121,7 +121,7 @@ impl<'tcx> LateLintPass<'tcx> for BoolAssertComparison {
             cx,
             BOOL_ASSERT_COMPARISON,
             macro_call.span,
-            &format!("used `{macro_name}!` with a literal bool"),
+            format!("used `{macro_name}!` with a literal bool"),
             |diag| {
                 // assert_eq!(...)
                 // ^^^^^^^^^

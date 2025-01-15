@@ -1,7 +1,8 @@
-use std::sync::Mutex;
+use std::cell::UnsafeCell;
 
-enum Foo { X(Mutex<Option<Foo>>) }
+enum Foo { X(UnsafeCell<Option<Foo>>) }
 //~^ ERROR recursive type `Foo` has infinite size
+//~| ERROR cycle detected
 
 impl Foo { fn bar(self) {} }
 

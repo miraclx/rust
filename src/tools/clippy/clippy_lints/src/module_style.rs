@@ -1,7 +1,8 @@
+use clippy_utils::diagnostics::span_lint_and_then;
 use rustc_ast::ast;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
 use rustc_lint::{EarlyContext, EarlyLintPass, Level, LintContext};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_session::impl_lint_pass;
 use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::{FileName, SourceFile, Span, SyntaxContext};
 use std::ffi::OsStr;
@@ -9,9 +10,9 @@ use std::path::{Component, Path};
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks that module layout uses only self named module files, bans `mod.rs` files.
+    /// Checks that module layout uses only self named module files; bans `mod.rs` files.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Having multiple module layout styles in a project can be confusing.
     ///
     /// ### Example
@@ -40,7 +41,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks that module layout uses only `mod.rs` files.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Having multiple module layout styles in a project can be confusing.
     ///
     /// ### Example
@@ -86,7 +87,7 @@ impl EarlyLintPass for ModStyle {
 
         // `folder_segments` is all unique folder path segments `path/to/foo.rs` gives
         // `[path, to]` but not foo
-        let mut folder_segments = FxHashSet::default();
+        let mut folder_segments = FxIndexSet::default();
         // `mod_folders` is all the unique folder names that contain a mod.rs file
         let mut mod_folders = FxHashSet::default();
         // `file_map` maps file names to the full path including the file name
@@ -120,15 +121,18 @@ impl EarlyLintPass for ModStyle {
         for folder in &folder_segments {
             if !mod_folders.contains(folder) {
                 if let Some((file, path)) = file_map.get(folder) {
-                    let mut correct = path.to_path_buf();
-                    correct.pop();
-                    correct.push(folder);
-                    correct.push("mod.rs");
-                    cx.struct_span_lint(
+                    span_lint_and_then(
+                        cx,
                         SELF_NAMED_MODULE_FILES,
                         Span::new(file.start_pos, file.start_pos, SyntaxContext::root(), None),
                         format!("`mod.rs` files are required, found `{}`", path.display()),
-                        |lint| lint.help(format!("move `{}` to `{}`", path.display(), correct.display(),)),
+                        |diag| {
+                            let mut correct = path.to_path_buf();
+                            correct.pop();
+                            correct.push(folder);
+                            correct.push("mod.rs");
+                            diag.help(format!("move `{}` to `{}`", path.display(), correct.display(),));
+                        },
                     );
                 }
             }
@@ -140,7 +144,7 @@ impl EarlyLintPass for ModStyle {
 /// is `mod.rs` we add it's parent folder to `mod_folders`.
 fn process_paths_for_mod_files<'a>(
     path: &'a Path,
-    folder_segments: &mut FxHashSet<&'a OsStr>,
+    folder_segments: &mut FxIndexSet<&'a OsStr>,
     mod_folders: &mut FxHashSet<&'a OsStr>,
 ) {
     let mut comp = path.components().rev().peekable();
@@ -153,17 +157,23 @@ fn process_paths_for_mod_files<'a>(
 }
 
 /// Checks every path for the presence of `mod.rs` files and emits the lint if found.
+/// We should not emit a lint for test modules in the presence of `mod.rs`.
+/// Using `mod.rs` in integration tests is a [common pattern](https://doc.rust-lang.org/book/ch11-03-test-organization.html#submodules-in-integration-test)
+/// for code-sharing between tests.
 fn check_self_named_mod_exists(cx: &EarlyContext<'_>, path: &Path, file: &SourceFile) {
-    if path.ends_with("mod.rs") {
-        let mut mod_file = path.to_path_buf();
-        mod_file.pop();
-        mod_file.set_extension("rs");
-
-        cx.struct_span_lint(
+    if path.ends_with("mod.rs") && !path.starts_with("tests") {
+        span_lint_and_then(
+            cx,
             MOD_MODULE_FILES,
             Span::new(file.start_pos, file.start_pos, SyntaxContext::root(), None),
             format!("`mod.rs` files are not allowed, found `{}`", path.display()),
-            |lint| lint.help(format!("move `{}` to `{}`", path.display(), mod_file.display())),
+            |diag| {
+                let mut mod_file = path.to_path_buf();
+                mod_file.pop();
+                mod_file.set_extension("rs");
+
+                diag.help(format!("move `{}` to `{}`", path.display(), mod_file.display()));
+            },
         );
     }
 }

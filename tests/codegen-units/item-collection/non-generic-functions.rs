@@ -1,4 +1,4 @@
-// compile-flags:-Zprint-mono-items=eager
+//@ compile-flags:-Zprint-mono-items=eager
 
 #![deny(dead_code)]
 #![feature(start)]
@@ -25,7 +25,9 @@ fn bar() {
     baz();
 }
 
-struct Struct { _x: i32 }
+struct Struct {
+    _x: i32,
+}
 
 impl Struct {
     //~ MONO_ITEM fn Struct::foo

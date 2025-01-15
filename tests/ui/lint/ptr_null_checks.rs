@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(ptr_from_ref)]
+//@ check-pass
 
 use std::ptr;
 
@@ -38,15 +36,15 @@ fn main() {
     if (&mut 8 as *mut i32).is_null() {}
     //~^ WARN references are not nullable
     if ptr::from_mut(&mut 8).is_null() {}
-    //~^ WARN references are not nullable
+    //~^ WARN call is never null
     if (&8 as *const i32).is_null() {}
     //~^ WARN references are not nullable
     if ptr::from_ref(&8).is_null() {}
-    //~^ WARN references are not nullable
+    //~^ WARN call is never null
     if ptr::from_ref(&8).cast_mut().is_null() {}
-    //~^ WARN references are not nullable
+    //~^ WARN call is never null
     if (ptr::from_ref(&8).cast_mut() as *mut i32).is_null() {}
-    //~^ WARN references are not nullable
+    //~^ WARN call is never null
     if (&8 as *const i32) == std::ptr::null() {}
     //~^ WARN references are not nullable
     let ref_num = &8;
@@ -64,6 +62,12 @@ fn main() {
     //~^ WARN references are not nullable
     if (&*{ static_i32() } as *const i32).is_null() {}
     //~^ WARN references are not nullable
+
+    // ---------------- Functions -------------------
+    if ptr::NonNull::new(&mut 8).unwrap().as_ptr().is_null() {}
+    //~^ WARN call is never null
+    if ptr::NonNull::<u8>::dangling().as_ptr().is_null() {}
+    //~^ WARN call is never null
 
     // ----------------------------------------------
     const ZPTR: *const () = 0 as *const _;

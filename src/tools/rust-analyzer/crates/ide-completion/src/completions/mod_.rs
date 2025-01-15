@@ -2,12 +2,12 @@
 
 use std::iter;
 
-use hir::{Module, ModuleSource};
+use hir::{HirFileIdExt, Module};
 use ide_db::{
-    base_db::{SourceDatabaseExt, VfsPath},
+    base_db::{SourceRootDatabase, VfsPath},
     FxHashSet, RootDatabase, SymbolKind,
 };
-use syntax::{ast, AstNode, SyntaxKind};
+use syntax::{ast, AstNode, SyntaxKind, ToSmolStr};
 
 use crate::{context::CompletionContext, CompletionItem, Completions};
 
@@ -21,7 +21,7 @@ pub(crate) fn complete_mod(
         return None;
     }
 
-    let _p = profile::span("completion::complete_mod");
+    let _p = tracing::info_span!("completion::complete_mod").entered();
 
     let mut current_module = ctx.module;
     // For `mod $0`, `ctx.module` is its parent, but for `mod f$0`, it's `mod f` itself, but we're
@@ -43,29 +43,29 @@ pub(crate) fn complete_mod(
 
     let module_definition_file =
         current_module.definition_source_file_id(ctx.db).original_file(ctx.db);
-    let source_root = ctx.db.source_root(ctx.db.file_source_root(module_definition_file));
+    let source_root = ctx.db.source_root(ctx.db.file_source_root(module_definition_file.file_id()));
     let directory_to_look_for_submodules = directory_to_look_for_submodules(
         current_module,
         ctx.db,
-        source_root.path_for_file(&module_definition_file)?,
+        source_root.path_for_file(&module_definition_file.file_id())?,
     )?;
 
     let existing_mod_declarations = current_module
         .children(ctx.db)
-        .filter_map(|module| Some(module.name(ctx.db)?.display(ctx.db).to_string()))
+        .filter_map(|module| Some(module.name(ctx.db)?.display(ctx.db, ctx.edition).to_string()))
         .filter(|module| module != ctx.original_token.text())
         .collect::<FxHashSet<_>>();
 
     let module_declaration_file =
-        current_module.declaration_source(ctx.db).map(|module_declaration_source_file| {
+        current_module.declaration_source_range(ctx.db).map(|module_declaration_source_file| {
             module_declaration_source_file.file_id.original_file(ctx.db)
         });
 
     source_root
         .iter()
-        .filter(|submodule_candidate_file| submodule_candidate_file != &module_definition_file)
-        .filter(|submodule_candidate_file| {
-            Some(submodule_candidate_file) != module_declaration_file.as_ref()
+        .filter(|&submodule_candidate_file| submodule_candidate_file != module_definition_file)
+        .filter(|&submodule_candidate_file| {
+            module_declaration_file.is_none_or(|it| it != submodule_candidate_file)
         })
         .filter_map(|submodule_file| {
             let submodule_path = source_root.path_for_file(&submodule_file)?;
@@ -98,7 +98,8 @@ pub(crate) fn complete_mod(
             if mod_under_caret.semicolon_token().is_none() {
                 label.push(';');
             }
-            let item = CompletionItem::new(SymbolKind::Module, ctx.source_range(), &label);
+            let item =
+                CompletionItem::new(SymbolKind::Module, ctx.source_range(), &label, ctx.edition);
             item.add_to(acc, ctx.db)
         });
 
@@ -139,7 +140,9 @@ fn directory_to_look_for_submodules(
     module_chain_to_containing_module_file(module, db)
         .into_iter()
         .filter_map(|module| module.name(db))
-        .try_fold(base_directory, |path, name| path.join(&name.to_smol_str()))
+        .try_fold(base_directory, |path, name| {
+            path.join(&name.unescaped().display_no_db().to_smolstr())
+        })
 }
 
 fn module_chain_to_containing_module_file(
@@ -148,9 +151,7 @@ fn module_chain_to_containing_module_file(
 ) -> Vec<Module> {
     let mut path =
         iter::successors(Some(current_module), |current_module| current_module.parent(db))
-            .take_while(|current_module| {
-                matches!(current_module.definition_source(db).value, ModuleSource::Module(_))
-            })
+            .take_while(|current_module| current_module.is_inline(db))
             .collect::<Vec<_>>();
     path.reverse();
     path

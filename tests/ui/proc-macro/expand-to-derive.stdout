@@ -1,7 +1,12 @@
 PRINT-DERIVE INPUT (DISPLAY): struct Foo
 {
     field :
-    [bool ; { #[rustc_dummy] struct Inner { other_inner_field : u8, } 0 }]
+    [bool; { #[rustc_dummy] struct Inner { other_inner_field: u8, } 0 }]
+}
+PRINT-DERIVE DEEP-RE-COLLECTED (DISPLAY): struct Foo
+{
+    field :
+    [bool; { #[rustc_dummy] struct Inner { other_inner_field : u8, } 0 }]
 }
 PRINT-DERIVE INPUT (DEBUG): TokenStream [
     Ident {
@@ -52,7 +57,7 @@ PRINT-DERIVE INPUT (DEBUG): TokenStream [
                                         span: $DIR/expand-to-derive.rs:27:28: 27:39 (#0),
                                     },
                                 ],
-                                span: $DIR/expand-to-derive.rs:27:5: 27:6 (#0),
+                                span: $DIR/expand-to-derive.rs:27:6: 27:41 (#0),
                             },
                             Ident {
                                 ident: "struct",

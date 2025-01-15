@@ -1,11 +1,8 @@
 #![doc = include_str!("error.md")]
-#![unstable(feature = "error_in_core", issue = "103765")]
-
-#[cfg(test)]
-mod tests;
+#![stable(feature = "error_in_core", since = "1.81.0")]
 
 use crate::any::TypeId;
-use crate::fmt::{Debug, Display, Formatter, Result};
+use crate::fmt::{self, Debug, Display, Formatter};
 
 /// `Error` is a trait representing the basic expectations for error values,
 /// i.e., values of type `E` in [`Result<T, E>`].
@@ -30,7 +27,7 @@ use crate::fmt::{Debug, Display, Formatter, Result};
 #[rustc_has_incoherent_inherent_impls]
 #[allow(multiple_supertrait_upcastable)]
 pub trait Error: Debug + Display {
-    /// The lower-level source of this error, if any.
+    /// Returns the lower-level source of this error, if any.
     ///
     /// # Examples
     ///
@@ -121,7 +118,7 @@ pub trait Error: Debug + Display {
         self.source()
     }
 
-    /// Provides type based access to context intended for error reports.
+    /// Provides type-based access to context intended for error reports.
     ///
     /// Used in conjunction with [`Request::provide_value`] and [`Request::provide_ref`] to extract
     /// references to member variables from `dyn Error` trait objects.
@@ -130,7 +127,6 @@ pub trait Error: Debug + Display {
     ///
     /// ```rust
     /// #![feature(error_generic_member_access)]
-    /// #![feature(error_in_core)]
     /// use core::fmt;
     /// use core::error::{request_ref, Request};
     ///
@@ -183,6 +179,7 @@ pub trait Error: Debug + Display {
     #[allow(unused_variables)]
     fn provide<'a>(&'a self, request: &mut Request<'a>) {}
 }
+
 mod private {
     // This is a hack to prevent `type_id` from being overridden by `Error`
     // implementations, since that can enable unsound downcasting.
@@ -338,30 +335,30 @@ impl dyn Error {
     #[unstable(feature = "error_iter", issue = "58520")]
     #[inline]
     pub fn sources(&self) -> Source<'_> {
-        // You may think this method would be better in the Error trait, and you'd be right.
-        // Unfortunately that doesn't work, not because of the object safety rules but because we
-        // save a reference to self in Sources below as a trait object. If this method was
-        // declared in Error, then self would have the type &T where T is some concrete type which
-        // implements Error. We would need to coerce self to have type &dyn Error, but that requires
-        // that Self has a known size (i.e., Self: Sized). We can't put that bound on Error
-        // since that would forbid Error trait objects, and we can't put that bound on the method
-        // because that means the method can't be called on trait objects (we'd also need the
-        // 'static bound, but that isn't allowed because methods with bounds on Self other than
-        // Sized are not object-safe). Requiring an Unsize bound is not backwards compatible.
+        // You may think this method would be better in the `Error` trait, and you'd be right.
+        // Unfortunately that doesn't work, not because of the dyn-incompatibility rules but
+        // because we save a reference to `self` in `Source`s below as a trait object.
+        // If this method was declared in `Error`, then `self` would have the type `&T` where
+        // `T` is some concrete type which implements `Error`. We would need to coerce `self`
+        // to have type `&dyn Error`, but that requires that `Self` has a known size
+        // (i.e., `Self: Sized`). We can't put that bound on `Error` since that would forbid
+        // `Error` trait objects, and we can't put that bound on the method because that means
+        // the method can't be called on trait objects (we'd also need the `'static` bound,
+        // but that isn't allowed because methods with bounds on `Self` other than `Sized` are
+        // dyn-incompatible). Requiring an `Unsize` bound is not backwards compatible.
 
         Source { current: Some(self) }
     }
 }
 
-/// Request a value of type `T` from the given `impl Error`.
+/// Requests a value of type `T` from the given `impl Error`.
 ///
 /// # Examples
 ///
 /// Get a string value from an error.
 ///
 /// ```rust
-/// # #![feature(error_generic_member_access)]
-/// # #![feature(error_in_core)]
+/// #![feature(error_generic_member_access)]
 /// use std::error::Error;
 /// use core::error::request_value;
 ///
@@ -377,15 +374,14 @@ where
     request_by_type_tag::<'a, tags::Value<T>>(err)
 }
 
-/// Request a reference of type `T` from the given `impl Error`.
+/// Requests a reference of type `T` from the given `impl Error`.
 ///
 /// # Examples
 ///
 /// Get a string reference from an error.
 ///
 /// ```rust
-/// # #![feature(error_generic_member_access)]
-/// # #![feature(error_in_core)]
+/// #![feature(error_generic_member_access)]
 /// use core::error::Error;
 /// use core::error::request_ref;
 ///
@@ -406,16 +402,16 @@ fn request_by_type_tag<'a, I>(err: &'a (impl Error + ?Sized)) -> Option<I::Reifi
 where
     I: tags::Type<'a>,
 {
-    let mut tagged = TaggedOption::<'a, I>(None);
+    let mut tagged = Tagged { tag_id: TypeId::of::<I>(), value: TaggedOption::<'a, I>(None) };
     err.provide(tagged.as_request());
-    tagged.0
+    tagged.value.0
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // Request and its methods
 ///////////////////////////////////////////////////////////////////////////////
 
-/// `Request` supports generic, type-driven access to data. It's use is currently restricted to the
+/// `Request` supports generic, type-driven access to data. Its use is currently restricted to the
 /// standard library in cases where trait authors wish to allow trait implementors to share generic
 /// information across trait boundaries. The motivating and prototypical use case is
 /// `core::error::Error` which would otherwise require a method per concrete type (eg.
@@ -439,10 +435,10 @@ where
 /// * A Producer initializes the value of one of its fields of a specific type. (or is otherwise
 /// prepared to generate a value requested). eg, `backtrace::Backtrace` or
 /// `std::backtrace::Backtrace`
-/// * A Consumer requests an object of a specific type (say `std::backtrace::Backtrace). In the case
-/// of a `dyn Error` trait object (the Producer), there are methods called `request_ref` and
-/// `request_value` are available to simplify obtaining an ``Option<T>`` for a given type. * The
-/// Producer, when requested, populates the given Request object which is given as a mutable
+/// * A Consumer requests an object of a specific type (say `std::backtrace::Backtrace`). In the
+/// case of a `dyn Error` trait object (the Producer), there are functions called `request_ref` and
+/// `request_value` to simplify obtaining an `Option<T>` for a given type.
+/// * The Producer, when requested, populates the given Request object which is given as a mutable
 /// reference.
 /// * The Consumer extracts a value or reference to the requested type from the `Request` object
 /// wrapped in an `Option<T>`; in the case of `dyn Error` the aforementioned `request_ref` and `
@@ -457,7 +453,6 @@ where
 ///
 /// ```
 /// #![feature(error_generic_member_access)]
-/// #![feature(error_in_core)]
 /// use core::fmt;
 /// use core::error::Request;
 /// use core::error::request_ref;
@@ -509,18 +504,11 @@ where
 /// ```
 ///
 #[unstable(feature = "error_generic_member_access", issue = "99301")]
-#[cfg_attr(not(doc), repr(transparent))] // work around https://github.com/rust-lang/rust/issues/90435
-pub struct Request<'a>(dyn Erased<'a> + 'a);
+#[repr(transparent)]
+pub struct Request<'a>(Tagged<dyn Erased<'a> + 'a>);
 
 impl<'a> Request<'a> {
-    /// Create a new `&mut Request` from a `&mut dyn Erased` trait object.
-    fn new<'b>(erased: &'b mut (dyn Erased<'a> + 'a)) -> &'b mut Request<'a> {
-        // SAFETY: transmuting `&mut (dyn Erased<'a> + 'a)` to `&mut Request<'a>` is safe since
-        // `Request` is repr(transparent).
-        unsafe { &mut *(erased as *mut dyn Erased<'a> as *mut Request<'a>) }
-    }
-
-    /// Provide a value or other type with only static lifetimes.
+    /// Provides a value or other type with only static lifetimes.
     ///
     /// # Examples
     ///
@@ -528,7 +516,6 @@ impl<'a> Request<'a> {
     ///
     /// ```rust
     /// #![feature(error_generic_member_access)]
-    /// #![feature(error_in_core)]
     ///
     /// use core::error::Request;
     ///
@@ -555,7 +542,7 @@ impl<'a> Request<'a> {
         self.provide::<tags::Value<T>>(value)
     }
 
-    /// Provide a value or other type with only static lifetimes computed using a closure.
+    /// Provides a value or other type with only static lifetimes computed using a closure.
     ///
     /// # Examples
     ///
@@ -563,7 +550,6 @@ impl<'a> Request<'a> {
     ///
     /// ```rust
     /// #![feature(error_generic_member_access)]
-    /// #![feature(error_in_core)]
     ///
     /// use core::error::Request;
     ///
@@ -590,7 +576,7 @@ impl<'a> Request<'a> {
         self.provide_with::<tags::Value<T>>(fulfil)
     }
 
-    /// Provide a reference. The referee type must be bounded by `'static`,
+    /// Provides a reference. The referee type must be bounded by `'static`,
     /// but may be unsized.
     ///
     /// # Examples
@@ -599,7 +585,6 @@ impl<'a> Request<'a> {
     ///
     /// ```rust
     /// #![feature(error_generic_member_access)]
-    /// #![feature(error_in_core)]
     ///
     /// use core::error::Request;
     ///
@@ -623,7 +608,7 @@ impl<'a> Request<'a> {
         self.provide::<tags::Ref<tags::MaybeSizedValue<T>>>(value)
     }
 
-    /// Provide a reference computed using a closure. The referee type
+    /// Provides a reference computed using a closure. The referee type
     /// must be bounded by `'static`, but may be unsized.
     ///
     /// # Examples
@@ -632,7 +617,6 @@ impl<'a> Request<'a> {
     ///
     /// ```rust
     /// #![feature(error_generic_member_access)]
-    /// #![feature(error_in_core)]
     ///
     /// use core::error::Request;
     ///
@@ -666,7 +650,7 @@ impl<'a> Request<'a> {
         self.provide_with::<tags::Ref<tags::MaybeSizedValue<T>>>(fulfil)
     }
 
-    /// Provide a value with the given `Type` tag.
+    /// Provides a value with the given `Type` tag.
     fn provide<I>(&mut self, value: I::Reified) -> &mut Self
     where
         I: tags::Type<'a>,
@@ -677,7 +661,7 @@ impl<'a> Request<'a> {
         self
     }
 
-    /// Provide a value with the given `Type` tag, using a closure to prevent unnecessary work.
+    /// Provides a value with the given `Type` tag, using a closure to prevent unnecessary work.
     fn provide_with<I>(&mut self, fulfil: impl FnOnce() -> I::Reified) -> &mut Self
     where
         I: tags::Type<'a>,
@@ -688,18 +672,17 @@ impl<'a> Request<'a> {
         self
     }
 
-    /// Check if the `Request` would be satisfied if provided with a
+    /// Checks if the `Request` would be satisfied if provided with a
     /// value of the specified type. If the type does not match or has
     /// already been provided, returns false.
     ///
     /// # Examples
     ///
-    /// Check if an `u8` still needs to be provided and then provides
+    /// Checks if a `u8` still needs to be provided and then provides
     /// it.
     ///
     /// ```rust
     /// #![feature(error_generic_member_access)]
-    /// #![feature(error_in_core)]
     ///
     /// use core::error::Request;
     /// use core::error::request_value;
@@ -776,18 +759,18 @@ impl<'a> Request<'a> {
         self.would_be_satisfied_by::<tags::Value<T>>()
     }
 
-    /// Check if the `Request` would be satisfied if provided with a
-    /// reference to a value of the specified type. If the type does
-    /// not match or has already been provided, returns false.
+    /// Checks if the `Request` would be satisfied if provided with a
+    /// reference to a value of the specified type.
+    ///
+    /// If the type does not match or has already been provided, returns false.
     ///
     /// # Examples
     ///
-    /// Check if a `&str` still needs to be provided and then provides
+    /// Checks if a `&str` still needs to be provided and then provides
     /// it.
     ///
     /// ```rust
     /// #![feature(error_generic_member_access)]
-    /// #![feature(error_in_core)]
     ///
     /// use core::error::Request;
     /// use core::error::request_ref;
@@ -874,7 +857,7 @@ impl<'a> Request<'a> {
 
 #[unstable(feature = "error_generic_member_access", issue = "99301")]
 impl<'a> Debug for Request<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Request").finish_non_exhaustive()
     }
 }
@@ -944,32 +927,33 @@ pub(crate) mod tags {
 /// An `Option` with a type tag `I`.
 ///
 /// Since this struct implements `Erased`, the type can be erased to make a dynamically typed
-/// option. The type can be checked dynamically using `Erased::tag_id` and since this is statically
+/// option. The type can be checked dynamically using `Tagged::tag_id` and since this is statically
 /// checked for the concrete type, there is some degree of type safety.
 #[repr(transparent)]
 pub(crate) struct TaggedOption<'a, I: tags::Type<'a>>(pub Option<I::Reified>);
 
-impl<'a, I: tags::Type<'a>> TaggedOption<'a, I> {
+impl<'a, I: tags::Type<'a>> Tagged<TaggedOption<'a, I>> {
     pub(crate) fn as_request(&mut self) -> &mut Request<'a> {
-        Request::new(self as &mut (dyn Erased<'a> + 'a))
+        let erased = self as &mut Tagged<dyn Erased<'a> + 'a>;
+        // SAFETY: transmuting `&mut Tagged<dyn Erased<'a> + 'a>` to `&mut Request<'a>` is safe since
+        // `Request` is repr(transparent).
+        unsafe { &mut *(erased as *mut Tagged<dyn Erased<'a>> as *mut Request<'a>) }
     }
 }
 
 /// Represents a type-erased but identifiable object.
 ///
 /// This trait is exclusively implemented by the `TaggedOption` type.
-unsafe trait Erased<'a>: 'a {
-    /// The `TypeId` of the erased type.
-    fn tag_id(&self) -> TypeId;
+unsafe trait Erased<'a>: 'a {}
+
+unsafe impl<'a, I: tags::Type<'a>> Erased<'a> for TaggedOption<'a, I> {}
+
+struct Tagged<E: ?Sized> {
+    tag_id: TypeId,
+    value: E,
 }
 
-unsafe impl<'a, I: tags::Type<'a>> Erased<'a> for TaggedOption<'a, I> {
-    fn tag_id(&self) -> TypeId {
-        TypeId::of::<I>()
-    }
-}
-
-impl<'a> dyn Erased<'a> + 'a {
+impl<'a> Tagged<dyn Erased<'a> + 'a> {
     /// Returns some reference to the dynamic value if it is tagged with `I`,
     /// or `None` otherwise.
     #[inline]
@@ -977,9 +961,9 @@ impl<'a> dyn Erased<'a> + 'a {
     where
         I: tags::Type<'a>,
     {
-        if self.tag_id() == TypeId::of::<I>() {
+        if self.tag_id == TypeId::of::<I>() {
             // SAFETY: Just checked whether we're pointing to an I.
-            Some(unsafe { &*(self as *const Self).cast::<TaggedOption<'a, I>>() })
+            Some(&unsafe { &*(self as *const Self).cast::<Tagged<TaggedOption<'a, I>>>() }.value)
         } else {
             None
         }
@@ -992,9 +976,12 @@ impl<'a> dyn Erased<'a> + 'a {
     where
         I: tags::Type<'a>,
     {
-        if self.tag_id() == TypeId::of::<I>() {
-            // SAFETY: Just checked whether we're pointing to an I.
-            Some(unsafe { &mut *(self as *mut Self).cast::<TaggedOption<'a, I>>() })
+        if self.tag_id == TypeId::of::<I>() {
+            Some(
+                // SAFETY: Just checked whether we're pointing to an I.
+                &mut unsafe { &mut *(self as *mut Self).cast::<Tagged<TaggedOption<'a, I>>>() }
+                    .value,
+            )
         } else {
             None
         }
@@ -1020,7 +1007,14 @@ impl<'a> Iterator for Source<'a> {
         self.current = self.current.and_then(Error::source);
         current
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.current.is_some() { (1, None) } else { (0, Some(0)) }
+    }
 }
+
+#[unstable(feature = "error_iter", issue = "58520")]
+impl<'a> crate::iter::FusedIterator for Source<'a> {}
 
 #[stable(feature = "error_by_ref", since = "1.51.0")]
 impl<'a, T: Error + ?Sized> Error for &'a T {
@@ -1082,4 +1076,4 @@ impl Error for crate::time::TryFromFloatSecsError {}
 impl Error for crate::ffi::FromBytesUntilNulError {}
 
 #[unstable(feature = "get_many_mut", issue = "104642")]
-impl<const N: usize> Error for crate::slice::GetManyMutError<N> {}
+impl Error for crate::slice::GetManyMutError {}

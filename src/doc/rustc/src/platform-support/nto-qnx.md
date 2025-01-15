@@ -13,6 +13,8 @@ and [Blackberry QNX][BlackBerry].
 
 - Florian Bartels, `Florian.Bartels@elektrobit.com`, https://github.com/flba-eb
 - Tristan Roach, `TRoach@blackberry.com`, https://github.com/gh-tr
+- Jonathan Pallant `Jonathan.Pallant@ferrous-systems.com`, https://github.com/jonathanpallant
+- Jorge Aparicio `Jorge.Aparicio@ferrous-systems.com`, https://github.com/japaric
 
 ## Requirements
 
@@ -22,6 +24,7 @@ Currently, the following QNX Neutrino versions and compilation targets are suppo
 |----------------------|---------------------|:------------:|:----------------:|
 | 7.1 | AArch64 | ✓ | ✓ |
 | 7.1 | x86_64  | ✓ | ✓ |
+| 7.0 | AArch64 | ? | ✓ |
 | 7.0 | x86     |   | ✓ |
 
 Adding other architectures that are supported by QNX Neutrino is possible.
@@ -40,6 +43,23 @@ should be available (in the `$PATH` variable).
 When linking `no_std` applications, they must link against `libc.so` (see example). This is
 required because applications always link against the `crt` library and `crt` depends on `libc.so`.
 This is done automatically when using the standard library.
+
+### Disabling RELocation Read-Only (RELRO)
+
+While not recommended by default, some QNX kernel setups may require the `RELRO` to be disabled with `-C relro_level=off`, e.g. by adding it to the `.cargo/config.toml` file:
+
+```toml
+[target.aarch64-unknown-nto-qnx700]
+rustflags = ["-C", "relro_level=off"]
+```
+
+If your QNX kernel does not allow it, and `relro` is not disabled, running compiled binary would fail with `syntax error: ... unexpected` or similar.  This is due to kernel trying to interpret compiled binary with `/bin/sh`, and obviously failing.  To verify that this is really the case, run your binary with the `DL_DEBUG=all` env var, and look for this output. If you see it, you should disable `relro` as described above.
+
+```text
+Resolution scope for Executable->/bin/sh:
+        Executable->/bin/sh
+        libc.so.4->/usr/lib/ldqnx-64.so.2
+```
 
 ### Small example application
 
@@ -98,7 +118,7 @@ Example content:
 
 ```toml
 profile = "compiler"
-changelog-seen = 2
+change-id = 115898
 ```
 
 2. Compile the Rust toolchain for an `x86_64-unknown-linux-gnu` host (for both `aarch64` and `x86_64` targets)
@@ -121,10 +141,8 @@ export build_env='
 
 env $build_env \
     ./x.py build \
-        --target aarch64-unknown-nto-qnx710 \
-        --target x86_64-pc-nto-qnx710 \
-        --target x86_64-unknown-linux-gnu \
-        rustc library/core library/alloc
+        --target aarch64-unknown-nto-qnx710,x86_64-pc-nto-qnx710,x86_64-unknown-linux-gnu \
+        rustc library/core library/alloc library/std
 ```
 
 ## Running the Rust test suite
@@ -160,8 +178,7 @@ export exclude_tests='
     --exclude src/tools/linkchecker
     --exclude tests/ui-fulldeps
     --exclude rustc
-    --exclude rustdoc
-    --exclude tests/run-make-fulldeps'
+    --exclude rustdoc'
 
 env $build_env \
     ./x.py test \

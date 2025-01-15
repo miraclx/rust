@@ -3,8 +3,9 @@
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::fmt::Display;
-use std::sync::atomic::AtomicUsize;
+use std::ptr;
 use std::sync::Once;
+use std::sync::atomic::AtomicUsize;
 
 const ATOMIC: AtomicUsize = AtomicUsize::new(5); //~ ERROR: interior mutable
 const CELL: Cell<usize> = Cell::new(6); //~ ERROR: interior mutable
@@ -14,9 +15,10 @@ const ATOMIC_TUPLE: ([AtomicUsize; 1], Vec<AtomicUsize>, u8) = ([ATOMIC], Vec::n
 macro_rules! declare_const {
     ($name:ident: $ty:ty = $e:expr) => {
         const $name: $ty = $e;
+        //~^ ERROR: interior mutable
     };
 }
-declare_const!(_ONCE: Once = Once::new()); //~ ERROR: interior mutable
+declare_const!(_ONCE: Once = Once::new());
 
 // const ATOMIC_REF: &AtomicUsize = &AtomicUsize::new(7); // This will simply trigger E0492.
 
@@ -49,7 +51,23 @@ mod issue_8493 {
         };
     }
 
-    issue_8493!(); //~ ERROR: interior mutable
+    issue_8493!();
+}
+
+#[repr(C, align(8))]
+struct NoAtomic(usize);
+#[repr(C, align(8))]
+struct WithAtomic(AtomicUsize);
+
+const fn with_non_null() -> *const WithAtomic {
+    const NO_ATOMIC: NoAtomic = NoAtomic(0);
+    (&NO_ATOMIC as *const NoAtomic).cast()
+}
+const WITH_ATOMIC: *const WithAtomic = with_non_null();
+
+struct Generic<T>(T);
+impl<T> Generic<T> {
+    const RAW_POINTER: *const Cell<T> = ptr::null();
 }
 
 fn main() {}

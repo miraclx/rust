@@ -5,6 +5,7 @@
 // the page, so we don't see major layout changes during the load of the page.
 "use strict";
 
+const builtinThemes = ["light", "dark", "ayu"];
 const darkThemes = ["dark", "ayu"];
 window.currentTheme = document.getElementById("themeStyle");
 
@@ -50,22 +51,11 @@ function removeClass(elem, className) {
  * Run a callback for every element of an Array.
  * @param {Array<?>}    arr        - The array to iterate over
  * @param {function(?)} func       - The callback
- * @param {boolean}     [reversed] - Whether to iterate in reverse
  */
-function onEach(arr, func, reversed) {
-    if (arr && arr.length > 0) {
-        if (reversed) {
-            for (let i = arr.length - 1; i >= 0; --i) {
-                if (func(arr[i])) {
-                    return true;
-                }
-            }
-        } else {
-            for (const elem of arr) {
-                if (func(elem)) {
-                    return true;
-                }
-            }
+function onEach(arr, func) {
+    for (const elem of arr) {
+        if (func(elem)) {
+            return true;
         }
     }
     return false;
@@ -79,14 +69,12 @@ function onEach(arr, func, reversed) {
  * https://developer.mozilla.org/en-US/docs/Web/API/NodeList
  * @param {NodeList<?>|HTMLCollection<?>} lazyArray  - An array to iterate over
  * @param {function(?)}                   func       - The callback
- * @param {boolean}                       [reversed] - Whether to iterate in reverse
  */
 // eslint-disable-next-line no-unused-vars
-function onEachLazy(lazyArray, func, reversed) {
+function onEachLazy(lazyArray, func) {
     return onEach(
         Array.prototype.slice.call(lazyArray),
-        func,
-        reversed);
+        func);
 }
 
 function updateLocalStorage(name, value) {
@@ -113,25 +101,46 @@ const getVar = (function getVar(name) {
 });
 
 function switchTheme(newThemeName, saveTheme) {
+    const themeNames = getVar("themes").split(",").filter(t => t);
+    themeNames.push(...builtinThemes);
+
+    // Ensure that the new theme name is among the defined themes
+    if (themeNames.indexOf(newThemeName) === -1) {
+        return;
+    }
+
     // If this new value comes from a system setting or from the previously
     // saved theme, no need to save it.
     if (saveTheme) {
         updateLocalStorage("theme", newThemeName);
     }
 
-    let newHref;
+    document.documentElement.setAttribute("data-theme", newThemeName);
 
-    if (newThemeName === "light" || newThemeName === "dark" || newThemeName === "ayu") {
-        newHref = getVar("static-root-path") + getVar("theme-" + newThemeName + "-css");
+    if (builtinThemes.indexOf(newThemeName) !== -1) {
+        if (window.currentTheme) {
+            window.currentTheme.parentNode.removeChild(window.currentTheme);
+            window.currentTheme = null;
+        }
     } else {
-        newHref = getVar("root-path") + newThemeName + getVar("resource-suffix") + ".css";
-    }
-
-    if (!window.currentTheme) {
-        document.write(`<link rel="stylesheet" id="themeStyle" href="${newHref}">`);
-        window.currentTheme = document.getElementById("themeStyle");
-    } else if (newHref !== window.currentTheme.href) {
-        window.currentTheme.href = newHref;
+        const newHref = getVar("root-path") + encodeURIComponent(newThemeName) +
+            getVar("resource-suffix") + ".css";
+        if (!window.currentTheme) {
+            // If we're in the middle of loading, document.write blocks
+            // rendering, but if we are done, it would blank the page.
+            if (document.readyState === "loading") {
+                document.write(`<link rel="stylesheet" id="themeStyle" href="${newHref}">`);
+                window.currentTheme = document.getElementById("themeStyle");
+            } else {
+                window.currentTheme = document.createElement("link");
+                window.currentTheme.rel = "stylesheet";
+                window.currentTheme.id = "themeStyle";
+                window.currentTheme.href = newHref;
+                document.documentElement.appendChild(window.currentTheme);
+            }
+        } else if (newHref !== window.currentTheme.href) {
+            window.currentTheme.href = newHref;
+        }
     }
 }
 
@@ -182,11 +191,43 @@ if (getSettingValue("use-system-theme") !== "false" && window.matchMedia) {
 
 updateTheme();
 
+// Hide, show, and resize the sidebar at page load time
+//
+// This needs to be done here because this JS is render-blocking,
+// so that the sidebar doesn't "jump" after appearing on screen.
+// The user interaction to change this is set up in main.js.
+//
+// At this point in page load, `document.body` is not available yet.
+// Set a class on the `<html>` element instead.
 if (getSettingValue("source-sidebar-show") === "true") {
-    // At this point in page load, `document.body` is not available yet.
-    // Set a class on the `<html>` element instead.
     addClass(document.documentElement, "src-sidebar-expanded");
 }
+if (getSettingValue("hide-sidebar") === "true") {
+    addClass(document.documentElement, "hide-sidebar");
+}
+if (getSettingValue("hide-toc") === "true") {
+    addClass(document.documentElement, "hide-toc");
+}
+if (getSettingValue("hide-modnav") === "true") {
+    addClass(document.documentElement, "hide-modnav");
+}
+function updateSidebarWidth() {
+    const desktopSidebarWidth = getSettingValue("desktop-sidebar-width");
+    if (desktopSidebarWidth && desktopSidebarWidth !== "null") {
+        document.documentElement.style.setProperty(
+            "--desktop-sidebar-width",
+            desktopSidebarWidth + "px",
+        );
+    }
+    const srcSidebarWidth = getSettingValue("src-sidebar-width");
+    if (srcSidebarWidth && srcSidebarWidth !== "null") {
+        document.documentElement.style.setProperty(
+            "--src-sidebar-width",
+            srcSidebarWidth + "px",
+        );
+    }
+}
+updateSidebarWidth();
 
 // If we navigate away (for example to a settings page), and then use the back or
 // forward button to get back to a page, the theme may have changed in the meantime.
@@ -200,5 +241,62 @@ if (getSettingValue("source-sidebar-show") === "true") {
 window.addEventListener("pageshow", ev => {
     if (ev.persisted) {
         setTimeout(updateTheme, 0);
+        setTimeout(updateSidebarWidth, 0);
     }
 });
+
+// Custom elements are used to insert some JS-dependent features into Rustdoc,
+// because the [parser] runs the connected callback
+// synchronously. It needs to be added synchronously so that nothing below it
+// becomes visible until after it's done. Otherwise, you get layout jank.
+//
+// That's also why this is in storage.js and not main.js.
+//
+// [parser]: https://html.spec.whatwg.org/multipage/parsing.html
+class RustdocSearchElement extends HTMLElement {
+    constructor() {
+        super();
+    }
+    connectedCallback() {
+        const rootPath = getVar("root-path");
+        const currentCrate = getVar("current-crate");
+        this.innerHTML = `<nav class="sub">
+            <form class="search-form">
+                <span></span> <!-- This empty span is a hacky fix for Safari - See #93184 -->
+                <div id="sidebar-button" tabindex="-1">
+                    <a href="${rootPath}${currentCrate}/all.html" title="show sidebar"></a>
+                </div>
+                <input
+                    class="search-input"
+                    name="search"
+                    aria-label="Run search in the documentation"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="Type ‘S’ or ‘/’ to search, ‘?’ for more options…"
+                    type="search">
+            </form>
+        </nav>`;
+    }
+}
+window.customElements.define("rustdoc-search", RustdocSearchElement);
+class RustdocToolbarElement extends HTMLElement {
+    constructor() {
+        super();
+    }
+    connectedCallback() {
+        // Avoid replacing the children after they're already here.
+        if (this.firstElementChild) {
+            return;
+        }
+        const rootPath = getVar("root-path");
+        this.innerHTML = `
+        <div id="settings-menu" tabindex="-1">
+            <a href="${rootPath}settings.html"><span class="label">Settings</span></a>
+        </div>
+        <div id="help-button" tabindex="-1">
+            <a href="${rootPath}help.html"><span class="label">Help</span></a>
+        </div>
+        <button id="toggle-all-docs"><span class="label">Summary</span></button>`;
+    }
+}
+window.customElements.define("rustdoc-toolbar", RustdocToolbarElement);

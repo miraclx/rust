@@ -10,19 +10,20 @@
 //!
 //! `ReachedFixedPoint` signals about this.
 
-use base_db::Edition;
-use hir_expand::name::Name;
+use either::Either;
+use hir_expand::{name::Name, Lookup};
+use span::Edition;
 use triomphe::Arc;
 
 use crate::{
-    data::adt::VariantData,
     db::DefDatabase,
     item_scope::{ImportOrExternCrate, BUILTIN_SCOPE},
+    item_tree::FieldsShape,
     nameres::{sub_namespace_match, BlockInfo, BuiltinShadowMode, DefMap, MacroSubNs},
     path::{ModPath, PathKind},
     per_ns::PerNs,
     visibility::{RawVisibility, Visibility},
-    AdtId, CrateId, EnumVariantId, LocalModuleId, ModuleDefId,
+    AdtId, LocalModuleId, ModuleDefId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,21 +43,33 @@ pub(super) struct ResolvePathResult {
     pub(super) resolved_def: PerNs,
     pub(super) segment_index: Option<usize>,
     pub(super) reached_fixedpoint: ReachedFixedPoint,
-    pub(super) krate: Option<CrateId>,
+    pub(super) prefix_info: ResolvePathResultPrefixInfo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResolvePathResultPrefixInfo {
+    pub(crate) differing_crate: bool,
+    /// Path of the form `Enum::Variant` (and not `Variant` alone).
+    pub enum_variant: bool,
 }
 
 impl ResolvePathResult {
     fn empty(reached_fixedpoint: ReachedFixedPoint) -> ResolvePathResult {
-        ResolvePathResult::with(PerNs::none(), reached_fixedpoint, None, None)
+        ResolvePathResult::new(
+            PerNs::none(),
+            reached_fixedpoint,
+            None,
+            ResolvePathResultPrefixInfo::default(),
+        )
     }
 
-    fn with(
+    fn new(
         resolved_def: PerNs,
         reached_fixedpoint: ReachedFixedPoint,
         segment_index: Option<usize>,
-        krate: Option<CrateId>,
+        prefix_info: ResolvePathResultPrefixInfo,
     ) -> ResolvePathResult {
-        ResolvePathResult { resolved_def, segment_index, reached_fixedpoint, krate }
+        ResolvePathResult { resolved_def, segment_index, reached_fixedpoint, prefix_info }
     }
 }
 
@@ -66,8 +79,8 @@ impl PerNs {
         db: &dyn DefDatabase,
         expected: Option<MacroSubNs>,
     ) -> Self {
-        self.macros = self.macros.filter(|&(id, _, _)| {
-            let this = MacroSubNs::from_id(db, id);
+        self.macros = self.macros.filter(|def| {
+            let this = MacroSubNs::from_id(db, def.def);
             sub_namespace_match(Some(this), expected)
         });
 
@@ -87,7 +100,7 @@ impl DefMap {
         within_impl: bool,
     ) -> Option<Visibility> {
         let mut vis = match visibility {
-            RawVisibility::Module(path) => {
+            RawVisibility::Module(path, explicitness) => {
                 let (result, remaining) =
                     self.resolve_path(db, original_module, path, BuiltinShadowMode::Module, None);
                 if remaining.is_some() {
@@ -95,9 +108,9 @@ impl DefMap {
                 }
                 let types = result.take_types()?;
                 match types {
-                    ModuleDefId::ModuleId(m) => Visibility::Module(m),
+                    ModuleDefId::ModuleId(m) => Visibility::Module(m, *explicitness),
+                    // error: visibility needs to refer to module
                     _ => {
-                        // error: visibility needs to refer to module
                         return None;
                     }
                 }
@@ -108,11 +121,11 @@ impl DefMap {
         // In block expressions, `self` normally refers to the containing non-block module, and
         // `super` to its parent (etc.). However, visibilities must only refer to a module in the
         // DefMap they're written in, so we restrict them when that happens.
-        if let Visibility::Module(m) = vis {
+        if let Visibility::Module(m, mv) = vis {
             // ...unless we're resolving visibility for an associated item in an impl.
             if self.block_id() != m.block && !within_impl {
                 cov_mark::hit!(adjust_vis_in_block_def_map);
-                vis = Visibility::Module(self.module_id(Self::ROOT));
+                vis = Visibility::Module(self.module_id(Self::ROOT), mv);
                 tracing::debug!("visibility {:?} points outside DefMap, adjusting to {:?}", m, vis);
             }
         }
@@ -134,11 +147,68 @@ impl DefMap {
         // resolving them to. Pass `None` otherwise, e.g. when we're resolving import paths.
         expected_macro_subns: Option<MacroSubNs>,
     ) -> ResolvePathResult {
-        let mut result = ResolvePathResult::empty(ReachedFixedPoint::No);
+        let mut result = self.resolve_path_fp_with_macro_single(
+            db,
+            mode,
+            original_module,
+            path,
+            shadow,
+            expected_macro_subns,
+        );
+
+        if self.block.is_none() {
+            // If we're in the root `DefMap`, we can resolve the path directly.
+            return result;
+        }
 
         let mut arc;
         let mut current_map = self;
+
+        let mut merge = |new: ResolvePathResult| {
+            result.resolved_def = result.resolved_def.or(new.resolved_def);
+            if result.reached_fixedpoint == ReachedFixedPoint::No {
+                result.reached_fixedpoint = new.reached_fixedpoint;
+            }
+            result.prefix_info.differing_crate |= new.prefix_info.differing_crate;
+            result.prefix_info.enum_variant |= new.prefix_info.enum_variant;
+            result.segment_index = match (result.segment_index, new.segment_index) {
+                (Some(idx), None) => Some(idx),
+                (Some(old), Some(new)) => Some(old.max(new)),
+                (None, new) => new,
+            };
+        };
+
         loop {
+            match current_map.block {
+                Some(block) if original_module == Self::ROOT => {
+                    // Block modules "inherit" names from its parent module.
+                    original_module = block.parent.local_id;
+                    arc = block.parent.def_map(db, current_map.krate);
+                    current_map = &arc;
+                }
+                // Proper (non-block) modules, including those in block `DefMap`s, don't.
+                _ => {
+                    if original_module != Self::ROOT && current_map.block.is_some() {
+                        // A module inside a block. Do not resolve items declared in upper blocks, but we do need to get
+                        // the prelude items (which are not inserted into blocks because they can be overridden there).
+                        original_module = Self::ROOT;
+                        arc = db.crate_def_map(self.krate);
+                        current_map = &arc;
+
+                        let new = current_map.resolve_path_fp_in_all_preludes(
+                            db,
+                            mode,
+                            original_module,
+                            path,
+                            shadow,
+                        );
+                        merge(new);
+                    }
+
+                    return result;
+                }
+            }
+
             let new = current_map.resolve_path_fp_with_macro_single(
                 db,
                 mode,
@@ -148,29 +218,7 @@ impl DefMap {
                 expected_macro_subns,
             );
 
-            // Merge `new` into `result`.
-            result.resolved_def = result.resolved_def.or(new.resolved_def);
-            if result.reached_fixedpoint == ReachedFixedPoint::No {
-                result.reached_fixedpoint = new.reached_fixedpoint;
-            }
-            // FIXME: this doesn't seem right; what if the different namespace resolutions come from different crates?
-            result.krate = result.krate.or(new.krate);
-            result.segment_index = match (result.segment_index, new.segment_index) {
-                (Some(idx), None) => Some(idx),
-                (Some(old), Some(new)) => Some(old.max(new)),
-                (None, new) => new,
-            };
-
-            match current_map.block {
-                Some(block) if original_module == Self::ROOT => {
-                    // Block modules "inherit" names from its parent module.
-                    original_module = block.parent.local_id;
-                    arc = block.parent.def_map(db, current_map.krate);
-                    current_map = &arc;
-                }
-                // Proper (non-block) modules, including those in block `DefMap`s, don't.
-                _ => return result,
-            }
+            merge(new);
         }
     }
 
@@ -183,17 +231,8 @@ impl DefMap {
         shadow: BuiltinShadowMode,
         expected_macro_subns: Option<MacroSubNs>,
     ) -> ResolvePathResult {
-        let graph = db.crate_graph();
-        let _cx = stdx::panic_context::enter(format!(
-            "DefMap {:?} crate_name={:?} block={:?} path={}",
-            self.krate,
-            graph[self.krate].display_name,
-            self.block,
-            path.display(db.upcast())
-        ));
-
         let mut segments = path.segments().iter().enumerate();
-        let mut curr_per_ns = match path.kind {
+        let curr_per_ns = match path.kind {
             PathKind::DollarCrate(krate) => {
                 if krate == self.krate {
                     cov_mark::hit!(macro_dollar_crate_self);
@@ -219,7 +258,7 @@ impl DefMap {
                     None => return ResolvePathResult::empty(ReachedFixedPoint::Yes),
                 };
                 tracing::debug!("resolving {:?} in crate root (+ extern prelude)", segment);
-                self.resolve_name_in_crate_root_or_extern_prelude(db, segment)
+                self.resolve_name_in_crate_root_or_extern_prelude(db, original_module, segment)
             }
             PathKind::Plain => {
                 let (_, segment) = match segments.next() {
@@ -278,10 +317,10 @@ impl DefMap {
                 stdx::never!(module.is_block_module());
 
                 if self.block != def_map.block {
-                    // If we have a different `DefMap` from `self` (the orignal `DefMap` we started
+                    // If we have a different `DefMap` from `self` (the original `DefMap` we started
                     // with), resolve the remaining path segments in that `DefMap`.
                     let path =
-                        ModPath::from_segments(PathKind::Super(0), path.segments().iter().cloned());
+                        ModPath::from_segments(PathKind::SELF, path.segments().iter().cloned());
                     return def_map.resolve_path_fp_with_macro(
                         db,
                         mode,
@@ -294,27 +333,98 @@ impl DefMap {
 
                 PerNs::types(module.into(), Visibility::Public, None)
             }
-            PathKind::Abs => {
-                // 2018-style absolute path -- only extern prelude
-                let segment = match segments.next() {
-                    Some((_, segment)) => segment,
+            PathKind::Abs => match self.resolve_path_abs(&mut segments, path) {
+                Either::Left(it) => it,
+                Either::Right(reached_fixed_point) => {
+                    return ResolvePathResult::empty(reached_fixed_point)
+                }
+            },
+        };
+
+        self.resolve_remaining_segments(segments, curr_per_ns, path, db, shadow, original_module)
+    }
+
+    /// Resolves a path only in the preludes, without accounting for item scopes.
+    pub(super) fn resolve_path_fp_in_all_preludes(
+        &self,
+        db: &dyn DefDatabase,
+        mode: ResolveMode,
+        original_module: LocalModuleId,
+        path: &ModPath,
+        shadow: BuiltinShadowMode,
+    ) -> ResolvePathResult {
+        let mut segments = path.segments().iter().enumerate();
+        let curr_per_ns = match path.kind {
+            // plain import or absolute path in 2015: crate-relative with
+            // fallback to extern prelude (with the simplification in
+            // rust-lang/rust#57745)
+            // FIXME there must be a nicer way to write this condition
+            PathKind::Plain | PathKind::Abs
+                if self.data.edition == Edition::Edition2015
+                    && (path.kind == PathKind::Abs || mode == ResolveMode::Import) =>
+            {
+                let (_, segment) = match segments.next() {
+                    Some((idx, segment)) => (idx, segment),
                     None => return ResolvePathResult::empty(ReachedFixedPoint::Yes),
                 };
-                if let Some(&(def, extern_crate)) = self.data.extern_prelude.get(segment) {
-                    tracing::debug!("absolute path {:?} resolved to crate {:?}", path, def);
-                    PerNs::types(
-                        def.into(),
-                        Visibility::Public,
-                        extern_crate.map(ImportOrExternCrate::ExternCrate),
-                    )
-                } else {
-                    return ResolvePathResult::empty(ReachedFixedPoint::No); // extern crate declarations can add to the extern prelude
+                tracing::debug!("resolving {:?} in crate root (+ extern prelude)", segment);
+                self.resolve_name_in_extern_prelude(segment)
+            }
+            PathKind::Plain => {
+                let (_, segment) = match segments.next() {
+                    Some((idx, segment)) => (idx, segment),
+                    None => return ResolvePathResult::empty(ReachedFixedPoint::Yes),
+                };
+                tracing::debug!("resolving {:?} in module", segment);
+                self.resolve_name_in_all_preludes(db, segment)
+            }
+            PathKind::Abs => match self.resolve_path_abs(&mut segments, path) {
+                Either::Left(it) => it,
+                Either::Right(reached_fixed_point) => {
+                    return ResolvePathResult::empty(reached_fixed_point)
                 }
+            },
+            PathKind::DollarCrate(_) | PathKind::Crate | PathKind::Super(_) => {
+                return ResolvePathResult::empty(ReachedFixedPoint::Yes)
             }
         };
 
-        for (i, segment) in segments {
-            let (curr, vis, imp) = match curr_per_ns.take_types_full() {
+        self.resolve_remaining_segments(segments, curr_per_ns, path, db, shadow, original_module)
+    }
+
+    /// 2018-style absolute path -- only extern prelude
+    fn resolve_path_abs<'a>(
+        &self,
+        segments: &mut impl Iterator<Item = (usize, &'a Name)>,
+        path: &ModPath,
+    ) -> Either<PerNs, ReachedFixedPoint> {
+        let segment = match segments.next() {
+            Some((_, segment)) => segment,
+            None => return Either::Right(ReachedFixedPoint::Yes),
+        };
+        if let Some(&(def, extern_crate)) = self.data.extern_prelude.get(segment) {
+            tracing::debug!("absolute path {:?} resolved to crate {:?}", path, def);
+            Either::Left(PerNs::types(
+                def.into(),
+                Visibility::Public,
+                extern_crate.map(ImportOrExternCrate::ExternCrate),
+            ))
+        } else {
+            Either::Right(ReachedFixedPoint::No) // extern crate declarations can add to the extern prelude
+        }
+    }
+
+    fn resolve_remaining_segments<'a>(
+        &self,
+        mut segments: impl Iterator<Item = (usize, &'a Name)>,
+        mut curr_per_ns: PerNs,
+        path: &ModPath,
+        db: &dyn DefDatabase,
+        shadow: BuiltinShadowMode,
+        original_module: LocalModuleId,
+    ) -> ResolvePathResult {
+        while let Some((i, segment)) = segments.next() {
+            let curr = match curr_per_ns.take_types_full() {
                 Some(r) => r,
                 None => {
                     // we still have path segments left, but the path so far
@@ -327,11 +437,11 @@ impl DefMap {
             };
             // resolve segment in curr
 
-            curr_per_ns = match curr {
+            curr_per_ns = match curr.def {
                 ModuleDefId::ModuleId(module) => {
                     if module.krate != self.krate {
                         let path = ModPath::from_segments(
-                            PathKind::Super(0),
+                            PathKind::SELF,
                             path.segments()[i..].iter().cloned(),
                         );
                         tracing::debug!("resolving {:?} in other crate", path);
@@ -340,13 +450,22 @@ impl DefMap {
                         // because `macro_use` and other preludes should be taken into account. At
                         // this point, we know we're resolving a multi-segment path so macro kind
                         // expectation is discarded.
-                        let (def, s) =
-                            defp_map.resolve_path(db, module.local_id, &path, shadow, None);
-                        return ResolvePathResult::with(
-                            def,
+                        let resolution = defp_map.resolve_path_fp_with_macro(
+                            db,
+                            ResolveMode::Other,
+                            module.local_id,
+                            &path,
+                            shadow,
+                            None,
+                        );
+                        return ResolvePathResult::new(
+                            resolution.resolved_def,
                             ReachedFixedPoint::Yes,
-                            s.map(|s| s + i),
-                            Some(module.krate),
+                            resolution.segment_index.map(|s| s + i),
+                            ResolvePathResultPrefixInfo {
+                                differing_crate: true,
+                                enum_variant: resolution.prefix_info.enum_variant,
+                            },
                         );
                     }
 
@@ -364,31 +483,58 @@ impl DefMap {
                 ModuleDefId::AdtId(AdtId::EnumId(e)) => {
                     // enum variant
                     cov_mark::hit!(can_import_enum_variant);
-                    let enum_data = db.enum_data(e);
-                    match enum_data.variant(segment) {
-                        Some(local_id) => {
-                            let variant = EnumVariantId { parent: e, local_id };
-                            match &*enum_data.variants[local_id].variant_data {
-                                VariantData::Record(_) => {
-                                    PerNs::types(variant.into(), Visibility::Public, None)
-                                }
-                                VariantData::Tuple(_) | VariantData::Unit => PerNs::both(
-                                    variant.into(),
-                                    variant.into(),
-                                    Visibility::Public,
+                    let def_map;
+
+                    let loc = e.lookup(db);
+                    let tree = loc.id.item_tree(db);
+                    let current_def_map =
+                        self.krate == loc.container.krate && self.block_id() == loc.container.block;
+                    let res = if current_def_map {
+                        &self.enum_definitions[&e]
+                    } else {
+                        def_map = loc.container.def_map(db);
+                        &def_map.enum_definitions[&e]
+                    }
+                    .iter()
+                    .find_map(|&variant| {
+                        let variant_data = &tree[variant.lookup(db).id.value];
+                        (variant_data.name == *segment).then(|| match variant_data.shape {
+                            FieldsShape::Record => {
+                                PerNs::types(variant.into(), Visibility::Public, None)
+                            }
+                            FieldsShape::Tuple | FieldsShape::Unit => PerNs::both(
+                                variant.into(),
+                                variant.into(),
+                                Visibility::Public,
+                                None,
+                            ),
+                        })
+                    });
+                    // FIXME: Need to filter visibility here and below? Not sure.
+                    return match res {
+                        Some(res) => {
+                            if segments.next().is_some() {
+                                // Enum variants are in value namespace, segments left => no resolution.
+                                ResolvePathResult::empty(ReachedFixedPoint::No)
+                            } else {
+                                ResolvePathResult::new(
+                                    res,
+                                    ReachedFixedPoint::Yes,
                                     None,
-                                ),
+                                    ResolvePathResultPrefixInfo {
+                                        enum_variant: true,
+                                        ..ResolvePathResultPrefixInfo::default()
+                                    },
+                                )
                             }
                         }
-                        None => {
-                            return ResolvePathResult::with(
-                                PerNs::types(e.into(), vis, imp),
-                                ReachedFixedPoint::Yes,
-                                Some(i),
-                                Some(self.krate),
-                            );
-                        }
-                    }
+                        None => ResolvePathResult::new(
+                            PerNs::types(e.into(), curr.vis, curr.import),
+                            ReachedFixedPoint::Yes,
+                            Some(i),
+                            ResolvePathResultPrefixInfo::default(),
+                        ),
+                    };
                 }
                 s => {
                     // could be an inherent method call in UFCS form
@@ -399,11 +545,11 @@ impl DefMap {
                         curr,
                     );
 
-                    return ResolvePathResult::with(
-                        PerNs::types(s, vis, imp),
+                    return ResolvePathResult::new(
+                        PerNs::types(s, curr.vis, curr.import),
                         ReachedFixedPoint::Yes,
                         Some(i),
-                        Some(self.krate),
+                        ResolvePathResultPrefixInfo::default(),
                     );
                 }
             };
@@ -412,7 +558,12 @@ impl DefMap {
                 .filter_visibility(|vis| vis.is_visible_from_def_map(db, self, original_module));
         }
 
-        ResolvePathResult::with(curr_per_ns, ReachedFixedPoint::Yes, None, Some(self.krate))
+        ResolvePathResult::new(
+            curr_per_ns,
+            ReachedFixedPoint::Yes,
+            None,
+            ResolvePathResultPrefixInfo::default(),
+        )
     }
 
     fn resolve_name_in_module(
@@ -455,30 +606,20 @@ impl DefMap {
         };
 
         let extern_prelude = || {
-            if self.block.is_some() {
-                // Don't resolve extern prelude in block `DefMap`s, defer it to the crate def map so
-                // that blocks can properly shadow them
+            if self.block.is_some() && module == DefMap::ROOT {
+                // Don't resolve extern prelude in pseudo-modules of blocks, because
+                // they might been shadowed by local names.
                 return PerNs::none();
             }
-            self.data.extern_prelude.get(name).map_or(PerNs::none(), |&(it, extern_crate)| {
-                PerNs::types(
-                    it.into(),
-                    Visibility::Public,
-                    extern_crate.map(ImportOrExternCrate::ExternCrate),
-                )
-            })
+            self.resolve_name_in_extern_prelude(name)
         };
-        let macro_use_prelude = || {
-            self.macro_use_prelude.get(name).map_or(PerNs::none(), |&(it, _extern_crate)| {
-                PerNs::macros(
-                    it.into(),
-                    Visibility::Public,
-                    // FIXME?
-                    None, // extern_crate.map(ImportOrExternCrate::ExternCrate),
-                )
-            })
+        let macro_use_prelude = || self.resolve_in_macro_use_prelude(name);
+        let prelude = || {
+            if self.block.is_some() && module == DefMap::ROOT {
+                return PerNs::none();
+            }
+            self.resolve_in_prelude(db, name)
         };
-        let prelude = || self.resolve_in_prelude(db, name);
 
         from_legacy_macro
             .or(from_scope_or_builtin)
@@ -487,9 +628,42 @@ impl DefMap {
             .or_else(prelude)
     }
 
+    fn resolve_name_in_all_preludes(&self, db: &dyn DefDatabase, name: &Name) -> PerNs {
+        // Resolve in:
+        //  - extern prelude / macro_use prelude
+        //  - std prelude
+        let extern_prelude = self.resolve_name_in_extern_prelude(name);
+        let macro_use_prelude = || self.resolve_in_macro_use_prelude(name);
+        let prelude = || self.resolve_in_prelude(db, name);
+
+        extern_prelude.or_else(macro_use_prelude).or_else(prelude)
+    }
+
+    fn resolve_name_in_extern_prelude(&self, name: &Name) -> PerNs {
+        self.data.extern_prelude.get(name).map_or(PerNs::none(), |&(it, extern_crate)| {
+            PerNs::types(
+                it.into(),
+                Visibility::Public,
+                extern_crate.map(ImportOrExternCrate::ExternCrate),
+            )
+        })
+    }
+
+    fn resolve_in_macro_use_prelude(&self, name: &Name) -> PerNs {
+        self.macro_use_prelude.get(name).map_or(PerNs::none(), |&(it, _extern_crate)| {
+            PerNs::macros(
+                it,
+                Visibility::Public,
+                // FIXME?
+                None, // extern_crate.map(ImportOrExternCrate::ExternCrate),
+            )
+        })
+    }
+
     fn resolve_name_in_crate_root_or_extern_prelude(
         &self,
         db: &dyn DefDatabase,
+        module: LocalModuleId,
         name: &Name,
     ) -> PerNs {
         let from_crate_root = match self.block {
@@ -500,20 +674,11 @@ impl DefMap {
             None => self[Self::ROOT].scope.get(name),
         };
         let from_extern_prelude = || {
-            if self.block.is_some() {
-                // Don't resolve extern prelude in block `DefMap`s.
+            if self.block.is_some() && module == DefMap::ROOT {
+                // Don't resolve extern prelude in pseudo-module of a block.
                 return PerNs::none();
             }
-            self.data.extern_prelude.get(name).copied().map_or(
-                PerNs::none(),
-                |(it, extern_crate)| {
-                    PerNs::types(
-                        it.into(),
-                        Visibility::Public,
-                        extern_crate.map(ImportOrExternCrate::ExternCrate),
-                    )
-                },
-            )
+            self.resolve_name_in_extern_prelude(name)
         };
 
         from_crate_root.or_else(from_extern_prelude)
@@ -536,7 +701,7 @@ impl DefMap {
     }
 }
 
-/// Given a block module, returns its nearest non-block module and the `DefMap` it blongs to.
+/// Given a block module, returns its nearest non-block module and the `DefMap` it belongs to.
 fn adjust_to_nearest_non_block_module(
     db: &dyn DefDatabase,
     def_map: &DefMap,

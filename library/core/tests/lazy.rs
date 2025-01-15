@@ -1,7 +1,6 @@
-use core::{
-    cell::{Cell, LazyCell, OnceCell},
-    sync::atomic::{AtomicUsize, Ordering::SeqCst},
-};
+use core::cell::{Cell, LazyCell, OnceCell};
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::Ordering::SeqCst;
 
 #[test]
 fn once_cell() {
@@ -112,6 +111,28 @@ fn lazy_new() {
 #[test]
 fn lazy_type_inference() {
     let _ = LazyCell::new(|| ());
+}
+
+#[test]
+#[cfg(panic = "unwind")]
+#[should_panic = "LazyCell instance has previously been poisoned"]
+fn lazy_force_mut_panic() {
+    let mut lazy = LazyCell::<String>::new(|| panic!());
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = LazyCell::force_mut(&mut lazy);
+    }))
+    .unwrap_err();
+    let _ = &*lazy;
+}
+
+#[test]
+fn lazy_force_mut() {
+    let s = "abc".to_owned();
+    let mut lazy = LazyCell::new(move || s);
+    LazyCell::force_mut(&mut lazy);
+    let p = LazyCell::force_mut(&mut lazy);
+    p.clear();
+    LazyCell::force_mut(&mut lazy);
 }
 
 #[test]

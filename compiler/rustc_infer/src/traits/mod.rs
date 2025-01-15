@@ -3,7 +3,6 @@
 //! [rustc-dev-guide]: https://rustc-dev-guide.rust-lang.org/traits/resolution.html
 
 mod engine;
-pub mod error_reporting;
 mod project;
 mod structural_impls;
 pub mod util;
@@ -13,23 +12,22 @@ use std::hash::{Hash, Hasher};
 
 use hir::def_id::LocalDefId;
 use rustc_hir as hir;
-use rustc_middle::ty::error::{ExpectedFound, TypeError};
-use rustc_middle::ty::{self, Const, ToPredicate, Ty, TyCtxt};
+use rustc_middle::traits::query::NoSolution;
+use rustc_middle::traits::solve::Certainty;
+pub use rustc_middle::traits::*;
+use rustc_middle::ty::{self, Ty, TyCtxt, Upcast};
 use rustc_span::Span;
+use thin_vec::ThinVec;
 
-pub use self::FulfillmentErrorCode::*;
 pub use self::ImplSource::*;
-pub use self::ObligationCauseCode::*;
 pub use self::SelectionError::*;
-
-pub use self::engine::{TraitEngine, TraitEngineExt};
-pub use self::project::MismatchedProjectionTypes;
+pub use self::engine::{FromSolverError, ScrubbedTraitError, TraitEngine};
 pub(crate) use self::project::UndoLog;
 pub use self::project::{
-    Normalized, NormalizedTy, ProjectionCache, ProjectionCacheEntry, ProjectionCacheKey,
-    ProjectionCacheStorage, Reveal,
+    MismatchedProjectionTypes, Normalized, NormalizedTerm, ProjectionCache, ProjectionCacheEntry,
+    ProjectionCacheKey, ProjectionCacheStorage,
 };
-pub use rustc_middle::traits::*;
+use crate::infer::InferCtxt;
 
 /// An `Obligation` represents some trait reference (e.g., `i32: Eq`) for
 /// which the "impl_source" must be found. The process of finding an "impl_source" is
@@ -87,6 +85,8 @@ pub type PredicateObligation<'tcx> = Obligation<'tcx, ty::Predicate<'tcx>>;
 pub type TraitObligation<'tcx> = Obligation<'tcx, ty::TraitPredicate<'tcx>>;
 pub type PolyTraitObligation<'tcx> = Obligation<'tcx, ty::PolyTraitPredicate<'tcx>>;
 
+pub type PredicateObligations<'tcx> = ThinVec<PredicateObligation<'tcx>>;
+
 impl<'tcx> PredicateObligation<'tcx> {
     /// Flips the polarity of the inner predicate.
     ///
@@ -104,50 +104,29 @@ impl<'tcx> PredicateObligation<'tcx> {
 impl<'tcx> PolyTraitObligation<'tcx> {
     pub fn derived_cause(
         &self,
-        variant: impl FnOnce(DerivedObligationCause<'tcx>) -> ObligationCauseCode<'tcx>,
+        variant: impl FnOnce(DerivedCause<'tcx>) -> ObligationCauseCode<'tcx>,
     ) -> ObligationCause<'tcx> {
         self.cause.clone().derived_cause(self.predicate, variant)
     }
 }
 
 // `PredicateObligation` is used a lot. Make sure it doesn't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-static_assert_size!(PredicateObligation<'_>, 48);
-
-pub type PredicateObligations<'tcx> = Vec<PredicateObligation<'tcx>>;
+#[cfg(target_pointer_width = "64")]
+rustc_data_structures::static_assert_size!(PredicateObligation<'_>, 48);
 
 pub type Selection<'tcx> = ImplSource<'tcx, PredicateObligation<'tcx>>;
 
-pub struct FulfillmentError<'tcx> {
-    pub obligation: PredicateObligation<'tcx>,
-    pub code: FulfillmentErrorCode<'tcx>,
-    /// Diagnostics only: the 'root' obligation which resulted in
-    /// the failure to process `obligation`. This is the obligation
-    /// that was initially passed to `register_predicate_obligation`
-    pub root_obligation: PredicateObligation<'tcx>,
-}
-
-#[derive(Clone)]
-pub enum FulfillmentErrorCode<'tcx> {
-    /// Inherently impossible to fulfill; this trait is implemented if and only if it is already implemented.
-    CodeCycle(Vec<PredicateObligation<'tcx>>),
-    CodeSelectionError(SelectionError<'tcx>),
-    CodeProjectionError(MismatchedProjectionTypes<'tcx>),
-    CodeSubtypeError(ExpectedFound<Ty<'tcx>>, TypeError<'tcx>), // always comes from a SubtypePredicate
-    CodeConstEquateError(ExpectedFound<Const<'tcx>>, TypeError<'tcx>),
-    CodeAmbiguity {
-        /// Overflow reported from the new solver `-Ztrait-solver=next`, which will
-        /// be reported as an regular error as opposed to a fatal error.
-        overflow: bool,
-    },
-}
+/// A callback that can be provided to `inspect_typeck`. Invoked on evaluation
+/// of root obligations.
+pub type ObligationInspector<'tcx> =
+    fn(&InferCtxt<'tcx>, &PredicateObligation<'tcx>, Result<Certainty, NoSolution>);
 
 impl<'tcx, O> Obligation<'tcx, O> {
     pub fn new(
         tcx: TyCtxt<'tcx>,
         cause: ObligationCause<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
-        predicate: impl ToPredicate<'tcx, O>,
+        predicate: impl Upcast<TyCtxt<'tcx>, O>,
     ) -> Obligation<'tcx, O> {
         Self::with_depth(tcx, cause, 0, param_env, predicate)
     }
@@ -165,9 +144,9 @@ impl<'tcx, O> Obligation<'tcx, O> {
         cause: ObligationCause<'tcx>,
         recursion_depth: usize,
         param_env: ty::ParamEnv<'tcx>,
-        predicate: impl ToPredicate<'tcx, O>,
+        predicate: impl Upcast<TyCtxt<'tcx>, O>,
     ) -> Obligation<'tcx, O> {
-        let predicate = predicate.to_predicate(tcx);
+        let predicate = predicate.upcast(tcx);
         Obligation { cause, param_env, recursion_depth, predicate }
     }
 
@@ -176,7 +155,7 @@ impl<'tcx, O> Obligation<'tcx, O> {
         span: Span,
         body_id: LocalDefId,
         param_env: ty::ParamEnv<'tcx>,
-        trait_ref: impl ToPredicate<'tcx, O>,
+        trait_ref: impl Upcast<TyCtxt<'tcx>, O>,
     ) -> Obligation<'tcx, O> {
         Obligation::new(tcx, ObligationCause::misc(span, body_id), param_env, trait_ref)
     }
@@ -184,24 +163,14 @@ impl<'tcx, O> Obligation<'tcx, O> {
     pub fn with<P>(
         &self,
         tcx: TyCtxt<'tcx>,
-        value: impl ToPredicate<'tcx, P>,
+        value: impl Upcast<TyCtxt<'tcx>, P>,
     ) -> Obligation<'tcx, P> {
         Obligation::with_depth(tcx, self.cause.clone(), self.recursion_depth, self.param_env, value)
     }
 }
 
-impl<'tcx> FulfillmentError<'tcx> {
-    pub fn new(
-        obligation: PredicateObligation<'tcx>,
-        code: FulfillmentErrorCode<'tcx>,
-        root_obligation: PredicateObligation<'tcx>,
-    ) -> FulfillmentError<'tcx> {
-        FulfillmentError { obligation, code, root_obligation }
-    }
-}
-
 impl<'tcx> PolyTraitObligation<'tcx> {
-    pub fn polarity(&self) -> ty::ImplPolarity {
+    pub fn polarity(&self) -> ty::PredicatePolarity {
         self.predicate.skip_binder().polarity
     }
 

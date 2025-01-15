@@ -299,6 +299,40 @@ pub mod cov_mark {
 }
 
 #[test]
+fn macro_exported_in_block_mod() {
+    check_at(
+        r#"
+#[macro_export]
+macro_rules! foo {
+    () => { pub struct FooWorks; };
+}
+macro_rules! bar {
+    () => { pub struct BarWorks; };
+}
+fn main() {
+    mod module {
+        foo!();
+        bar!();
+        $0
+    }
+}
+"#,
+        expect![[r#"
+            block scope
+            module: t
+
+            block scope::module
+            BarWorks: t v
+            FooWorks: t v
+
+            crate
+            foo: m
+            main: v
+        "#]],
+    );
+}
+
+#[test]
 fn macro_resolve_legacy() {
     check_at(
         r#"
@@ -491,6 +525,68 @@ fn f() {$0
 
             crate
             f: v
+        "#]],
+    )
+}
+
+#[test]
+fn resolve_extern_prelude_in_block() {
+    check_at(
+        r#"
+//- /main.rs crate:main deps:core
+fn main() {
+    mod f {
+        use core::S;
+        $0
+    }
+}
+
+//- /core.rs crate:core
+pub struct S;
+        "#,
+        expect![[r#"
+            block scope
+            f: t
+
+            block scope::f
+            S: ti vi
+
+            crate
+            main: v
+        "#]],
+    )
+}
+
+#[test]
+fn shadow_extern_prelude_in_block() {
+    check_at(
+        r#"
+//- /main.rs crate:main deps:core
+fn main() {
+    mod core { pub struct S; }
+    {
+        fn inner() {} // forces a block def map
+        use core::S; // should resolve to the local one
+        $0
+    }
+}
+
+//- /core.rs crate:core
+pub const S;
+        "#,
+        expect![[r#"
+            block scope
+            S: ti vi
+            inner: v
+
+            block scope
+            core: t
+
+            block scope::core
+            S: t v
+
+            crate
+            main: v
         "#]],
     )
 }

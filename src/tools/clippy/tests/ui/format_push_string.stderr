@@ -1,14 +1,15 @@
 error: `format!(..)` appended to existing `String`
-  --> $DIR/format_push_string.rs:5:5
+  --> tests/ui/format_push_string.rs:5:5
    |
 LL |     string += &format!("{:?}", 1234);
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: consider using `write!` to avoid the extra allocation
    = note: `-D clippy::format-push-string` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::format_push_string)]`
 
 error: `format!(..)` appended to existing `String`
-  --> $DIR/format_push_string.rs:7:5
+  --> tests/ui/format_push_string.rs:7:5
    |
 LL |     string.push_str(&format!("{:?}", 5678));
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -16,7 +17,7 @@ LL |     string.push_str(&format!("{:?}", 5678));
    = help: consider using `write!` to avoid the extra allocation
 
 error: `format!(..)` appended to existing `String`
-  --> $DIR/format_push_string.rs:15:13
+  --> tests/ui/format_push_string.rs:15:13
    |
 LL | /             hex += &(if upper {
 LL | |
@@ -29,7 +30,7 @@ LL | |             });
    = help: consider using `write!` to avoid the extra allocation
 
 error: `format!(..)` appended to existing `String`
-  --> $DIR/format_push_string.rs:28:9
+  --> tests/ui/format_push_string.rs:28:9
    |
 LL | /         s += &(if let Some(_a) = Some(1234) {
 LL | |
@@ -42,7 +43,7 @@ LL | |         });
    = help: consider using `write!` to avoid the extra allocation
 
 error: `format!(..)` appended to existing `String`
-  --> $DIR/format_push_string.rs:35:9
+  --> tests/ui/format_push_string.rs:35:9
    |
 LL | /         s += &(match Some(1234) {
 LL | |

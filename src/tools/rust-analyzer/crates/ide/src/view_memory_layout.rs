@@ -6,6 +6,7 @@ use ide_db::{
     helpers::{get_definition, pick_best_token},
     RootDatabase,
 };
+use span::Edition;
 use syntax::{AstNode, SyntaxKind};
 
 use crate::FilePosition;
@@ -40,7 +41,7 @@ impl fmt::Display for RecursiveMemoryLayout {
                 "{}: {} (size: {}, align: {}, field offset: {})\n",
                 node.item_name, node.typename, node.size, node.alignment, node.offset
             );
-            write!(fmt, "{}", out)?;
+            write!(fmt, "{out}")?;
             if node.children_start != -1 {
                 for j in nodes[idx].children_start
                     ..(nodes[idx].children_start + nodes[idx].children_len as i64)
@@ -55,6 +56,7 @@ impl fmt::Display for RecursiveMemoryLayout {
     }
 }
 
+#[derive(Copy, Clone)]
 enum FieldOrTupleIdx {
     Field(Field),
     TupleIdx(usize),
@@ -63,19 +65,8 @@ enum FieldOrTupleIdx {
 impl FieldOrTupleIdx {
     fn name(&self, db: &RootDatabase) -> String {
         match *self {
-            FieldOrTupleIdx::Field(f) => f
-                .name(db)
-                .as_str()
-                .map(|s| s.to_owned())
-                .unwrap_or_else(|| format!(".{}", f.name(db).as_tuple_index().unwrap())),
-            FieldOrTupleIdx::TupleIdx(i) => format!(".{i}").to_owned(),
-        }
-    }
-
-    fn index(&self) -> usize {
-        match *self {
-            FieldOrTupleIdx::Field(f) => f.index(),
-            FieldOrTupleIdx::TupleIdx(i) => i,
+            FieldOrTupleIdx::Field(f) => f.name(db).as_str().to_owned(),
+            FieldOrTupleIdx::TupleIdx(i) => format!(".{i}"),
         }
     }
 }
@@ -94,7 +85,11 @@ pub(crate) fn view_memory_layout(
     position: FilePosition,
 ) -> Option<RecursiveMemoryLayout> {
     let sema = Semantics::new(db);
-    let file = sema.parse(position.file_id);
+    let file = sema.parse_guess_edition(position.file_id);
+    let edition = sema
+        .attach_first_edition(position.file_id)
+        .map(|it| it.edition())
+        .unwrap_or(Edition::CURRENT);
     let token =
         pick_best_token(file.syntax().token_at_offset(position.offset), |kind| match kind {
             SyntaxKind::IDENT => 3,
@@ -121,6 +116,7 @@ pub(crate) fn view_memory_layout(
         ty: &Type,
         layout: &Layout,
         parent_idx: usize,
+        edition: Edition,
     ) {
         let mut fields = ty
             .fields(db)
@@ -134,11 +130,14 @@ pub(crate) fn view_memory_layout(
             )
             .collect::<Vec<_>>();
 
-        if fields.len() == 0 {
+        if fields.is_empty() {
             return;
         }
 
-        fields.sort_by_key(|(f, _)| layout.field_offset(f.index()).unwrap());
+        fields.sort_by_key(|&(f, _)| match f {
+            FieldOrTupleIdx::Field(f) => layout.field_offset(f).unwrap_or(0),
+            FieldOrTupleIdx::TupleIdx(f) => layout.tuple_field_offset(f).unwrap_or(0),
+        });
 
         let children_start = nodes.len();
         nodes[parent_idx].children_start = children_start as i64;
@@ -148,10 +147,13 @@ pub(crate) fn view_memory_layout(
             if let Ok(child_layout) = child_ty.layout(db) {
                 nodes.push(MemoryLayoutNode {
                     item_name: field.name(db),
-                    typename: child_ty.display(db).to_string(),
+                    typename: child_ty.display(db, edition).to_string(),
                     size: child_layout.size(),
                     alignment: child_layout.align(),
-                    offset: layout.field_offset(field.index()).unwrap_or(0),
+                    offset: match *field {
+                        FieldOrTupleIdx::Field(f) => layout.field_offset(f).unwrap_or(0),
+                        FieldOrTupleIdx::TupleIdx(f) => layout.tuple_field_offset(f).unwrap_or(0),
+                    },
                     parent_idx: parent_idx as i64,
                     children_start: -1,
                     children_len: 0,
@@ -161,7 +163,7 @@ pub(crate) fn view_memory_layout(
                     item_name: field.name(db)
                         + format!("(no layout data: {:?})", child_ty.layout(db).unwrap_err())
                             .as_ref(),
-                    typename: child_ty.display(db).to_string(),
+                    typename: child_ty.display(db, edition).to_string(),
                     size: 0,
                     offset: 0,
                     alignment: 0,
@@ -174,7 +176,7 @@ pub(crate) fn view_memory_layout(
 
         for (i, (_, child_ty)) in fields.iter().enumerate() {
             if let Ok(child_layout) = child_ty.layout(db) {
-                read_layout(nodes, db, &child_ty, &child_layout, children_start + i);
+                read_layout(nodes, db, child_ty, &child_layout, children_start + i, edition);
             }
         }
     }
@@ -189,21 +191,14 @@ pub(crate) fn view_memory_layout(
                 | Definition::SelfType(_) => "[ROOT]".to_owned(),
 
                 // def is an item
-                def => def
-                    .name(db)
-                    .map(|n| {
-                        n.as_str()
-                            .map(|s| s.to_owned())
-                            .unwrap_or_else(|| format!(".{}", n.as_tuple_index().unwrap()))
-                    })
-                    .unwrap_or("[ROOT]".to_owned()),
+                def => def.name(db).map(|n| n.as_str().to_owned()).unwrap_or("[ROOT]".to_owned()),
             };
 
-            let typename = ty.display(db).to_string();
+            let typename = ty.display(db, edition).to_string();
 
             let mut nodes = vec![MemoryLayoutNode {
                 item_name,
-                typename: typename.clone(),
+                typename,
                 size: layout.size(),
                 offset: 0,
                 alignment: layout.align(),
@@ -211,7 +206,7 @@ pub(crate) fn view_memory_layout(
                 children_start: -1,
                 children_len: 0,
             }];
-            read_layout(&mut nodes, db, &ty, &layout, 0);
+            read_layout(&mut nodes, db, &ty, &layout, 0, edition);
 
             RecursiveMemoryLayout { nodes }
         })

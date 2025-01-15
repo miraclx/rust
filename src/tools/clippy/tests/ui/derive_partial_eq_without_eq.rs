@@ -14,6 +14,22 @@ pub struct MissingEq {
     bar: String,
 }
 
+// Check that we honor the `allow` attribute
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, PartialEq)]
+pub struct AllowedMissingEq {
+    foo: u32,
+    bar: String,
+}
+
+// Check that we honor the `expect` attribute
+#[expect(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, PartialEq)]
+pub struct ExpectedMissingEq {
+    foo: u32,
+    bar: String,
+}
+
 // Eq is derived
 #[derive(PartialEq, Eq)]
 pub struct NotMissingEq {
@@ -120,5 +136,63 @@ pub fn _from_mod() -> _hidden::InPubFn {
 
 #[derive(PartialEq)]
 struct InternalTy;
+
+// This is a `non_exhaustive` type so should not warn.
+#[derive(Debug, PartialEq)]
+#[non_exhaustive]
+pub struct MissingEqNonExhaustive {
+    foo: u32,
+    bar: String,
+}
+
+// This is a `non_exhaustive` type so should not warn.
+#[derive(Debug, PartialEq)]
+pub struct MissingEqNonExhaustive1 {
+    foo: u32,
+    #[non_exhaustive]
+    bar: String,
+}
+
+// This is a `non_exhaustive` type so should not warn.
+#[derive(Debug, PartialEq)]
+#[non_exhaustive]
+pub enum MissingEqNonExhaustive2 {
+    Foo,
+    Bar,
+}
+
+// This is a `non_exhaustive` type so should not warn.
+#[derive(Debug, PartialEq)]
+pub enum MissingEqNonExhaustive3 {
+    Foo,
+    #[non_exhaustive]
+    Bar,
+}
+
+mod struct_gen {
+    // issue 9413
+    pub trait Group {
+        type Element: Eq + PartialEq;
+    }
+
+    pub trait Suite {
+        type Group: Group;
+    }
+
+    #[derive(PartialEq)]
+    //~^ ERROR: you are deriving `PartialEq` and can implement `Eq`
+    pub struct Foo<C: Suite>(<C::Group as Group>::Element);
+
+    #[derive(PartialEq, Eq)]
+    pub struct Bar<C: Suite>(i32, <C::Group as Group>::Element);
+
+    // issue 9319
+    #[derive(PartialEq)]
+    //~^ ERROR: you are deriving `PartialEq` and can implement `Eq`
+    pub struct Oof<T: Fn()>(T);
+
+    #[derive(PartialEq, Eq)]
+    pub struct Rab<T: Fn()>(T);
+}
 
 fn main() {}

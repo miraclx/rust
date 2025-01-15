@@ -1,8 +1,11 @@
 use std::str;
-use test::{black_box, Bencher};
+
+use test::{Bencher, black_box};
 
 mod char_count;
 mod corpora;
+mod debug;
+mod iter;
 
 #[bench]
 fn str_validate_emoji(b: &mut Bencher) {

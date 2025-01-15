@@ -3,8 +3,7 @@
 //@[uniq]compile-flags: -Zmiri-unique-is-unique
 #![feature(allocator_api)]
 
-use std::mem;
-use std::ptr;
+use std::{mem, ptr};
 
 fn main() {
     aliasing_read_only_mutable_refs();
@@ -12,6 +11,7 @@ fn main() {
     two_mut_protected_same_alloc();
     direct_mut_to_const_raw();
     local_addr_of_mut();
+    returned_mut_is_usable();
 
     // Stacked Borrows tests
     read_does_not_invalidate1();
@@ -91,6 +91,24 @@ fn two_mut_protected_same_alloc() {
 
     let mut data = (0u8, 1u8);
     write_second(&mut data.0, &mut data.1);
+}
+
+// This checks that a reborrowed mutable reference returned from a function
+// is actually writeable.
+// The fact that this is not obvious is due to the addition of
+// implicit reads on function exit that might freeze the return value.
+fn returned_mut_is_usable() {
+    fn reborrow(x: &mut u8) -> &mut u8 {
+        let y = &mut *x;
+        // Activate the reference so that it is vulnerable to foreign reads.
+        *y = *y;
+        y
+        // An implicit read through `x` is inserted here.
+    }
+    let mut data = 0;
+    let x = &mut data;
+    let y = reborrow(x);
+    *y = 1;
 }
 
 // ----- The tests below were taken from Stacked Borrows ----
@@ -296,13 +314,13 @@ fn wide_raw_ptr_in_tuple() {
 fn not_unpin_not_protected() {
     // `&mut !Unpin`, at least for now, does not get `noalias` nor `dereferenceable`, so we also
     // don't add protectors. (We could, but until we have a better idea for where we want to go with
-    // the self-referential-generator situation, it does not seem worth the potential trouble.)
+    // the self-referential-coroutine situation, it does not seem worth the potential trouble.)
     use std::marker::PhantomPinned;
 
-    pub struct NotUnpin(i32, PhantomPinned);
+    pub struct NotUnpin(#[allow(dead_code)] i32, PhantomPinned);
 
     fn inner(x: &mut NotUnpin, f: fn(&mut NotUnpin)) {
-        // `f` may mutate, but it may not deallocate!
+        // `f` is allowed to deallocate `x`.
         f(x)
     }
 

@@ -1,7 +1,6 @@
-// build-fail
-// compile-flags: -Copt-level=0
-// normalize-stderr-test: ".nll/" -> "/"
-// ignore-compare-mode-next-solver (hangs)
+//@ build-fail
+//@ compile-flags: -Copt-level=0
+//@ normalize-stderr: ".nll/" -> "/"
 
 fn main() {
     rec(Empty);

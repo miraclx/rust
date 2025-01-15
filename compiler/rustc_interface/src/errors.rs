@@ -1,10 +1,8 @@
-use rustc_macros::Diagnostic;
-use rustc_session::config::CrateType;
-use rustc_span::{Span, Symbol};
-use rustc_target::spec::TargetTriple;
-
 use std::io;
 use std::path::Path;
+
+use rustc_macros::Diagnostic;
+use rustc_span::{Span, Symbol};
 
 #[derive(Diagnostic)]
 #[diag(interface_ferris_identifier)]
@@ -89,13 +87,6 @@ pub struct FailedWritingFile<'a> {
 #[derive(Diagnostic)]
 #[diag(interface_proc_macro_crate_panic_abort)]
 pub struct ProcMacroCratePanicAbort;
-
-#[derive(Diagnostic)]
-#[diag(interface_unsupported_crate_type_for_target)]
-pub struct UnsupportedCrateTypeForTarget<'a> {
-    pub crate_type: CrateType,
-    pub target_triple: &'a TargetTriple,
-}
 
 #[derive(Diagnostic)]
 #[diag(interface_multiple_output_types_adaption)]

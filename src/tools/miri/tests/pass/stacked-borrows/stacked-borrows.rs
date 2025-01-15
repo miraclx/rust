@@ -8,6 +8,7 @@ fn main() {
     mut_raw_then_mut_shr();
     mut_shr_then_mut_raw();
     mut_raw_mut();
+    mut_raw_mut2();
     partially_invalidate_mut();
     drop_after_sharing();
     // direct_mut_to_const_raw();
@@ -20,6 +21,7 @@ fn main() {
     wide_raw_ptr_in_tuple();
     not_unpin_not_protected();
     write_does_not_invalidate_all_aliases();
+    box_into_raw_allows_interior_mutable_alias();
 }
 
 // Make sure that reading from an `&mut` does, like reborrowing to `&`,
@@ -93,6 +95,18 @@ fn mut_raw_mut() {
         // we cannot use xref2; see `compile-fail/stacked-borrows/illegal_read4.rs`
     }
     assert_eq!(x, 4);
+}
+
+// A variant of `mut_raw_mut` that does *not* get accepted by Tree Borrows.
+// It's kind of an accident that we accept it in Stacked Borrows...
+fn mut_raw_mut2() {
+    unsafe {
+        let mut root = 0;
+        let to = &mut root as *mut i32;
+        *to = 0;
+        let _val = root;
+        *to = 0;
+    }
 }
 
 fn partially_invalidate_mut() {
@@ -223,10 +237,10 @@ fn wide_raw_ptr_in_tuple() {
 fn not_unpin_not_protected() {
     // `&mut !Unpin`, at least for now, does not get `noalias` nor `dereferenceable`, so we also
     // don't add protectors. (We could, but until we have a better idea for where we want to go with
-    // the self-referential-generator situation, it does not seem worth the potential trouble.)
+    // the self-referential-coroutine situation, it does not seem worth the potential trouble.)
     use std::marker::PhantomPinned;
 
-    pub struct NotUnpin(i32, PhantomPinned);
+    pub struct NotUnpin(#[allow(dead_code)] i32, PhantomPinned);
 
     fn inner(x: &mut NotUnpin, f: fn(&mut NotUnpin)) {
         // `f` may mutate, but it may not deallocate!
@@ -262,4 +276,17 @@ fn write_does_not_invalidate_all_aliases() {
     *x = 42; // a write to x -- invalidates other pointers?
     other::lib2();
     assert_eq!(*x, 1337); // oops, the value changed! I guess not all pointers were invalidated
+}
+
+fn box_into_raw_allows_interior_mutable_alias() {
+    unsafe {
+        let b = Box::new(std::cell::Cell::new(42));
+        let raw = Box::into_raw(b);
+        let c = &*raw;
+        let d = raw.cast::<i32>(); // bypassing `Cell` -- only okay in Miri tests
+        // `c` and `d` should permit arbitrary aliasing with each other now.
+        *d = 1;
+        c.set(2);
+        drop(Box::from_raw(raw));
+    }
 }

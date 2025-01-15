@@ -8,10 +8,9 @@
 
 use alloc::boxed::Box;
 use core::any::Any;
-use core::intrinsics;
-use core::mem;
-use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
+use core::{intrinsics, mem, ptr};
+
 use unwind as uw;
 
 // This matches the layout of std::type_info in C++
@@ -79,12 +78,12 @@ pub unsafe fn cleanup(ptr: *mut u8) -> Box<dyn Any + Send> {
         super::__rust_foreign_exception();
     }
 
-    let canary = ptr::addr_of!((*adjusted_ptr).canary).read();
+    let canary = (&raw const (*adjusted_ptr).canary).read();
     if !ptr::eq(canary, &EXCEPTION_TYPE_INFO) {
         super::__rust_foreign_exception();
     }
 
-    let was_caught = (*adjusted_ptr).caught.swap(true, Ordering::SeqCst);
+    let was_caught = (*adjusted_ptr).caught.swap(true, Ordering::Relaxed);
     if was_caught {
         // Since cleanup() isn't allowed to panic, we just abort instead.
         intrinsics::abort();
@@ -99,14 +98,11 @@ pub unsafe fn panic(data: Box<dyn Any + Send>) -> u32 {
     if exception.is_null() {
         return uw::_URC_FATAL_PHASE1_ERROR as u32;
     }
-    ptr::write(
-        exception,
-        Exception {
-            canary: &EXCEPTION_TYPE_INFO,
-            caught: AtomicBool::new(false),
-            data: Some(data),
-        },
-    );
+    ptr::write(exception, Exception {
+        canary: &EXCEPTION_TYPE_INFO,
+        caught: AtomicBool::new(false),
+        data: Some(data),
+    });
     __cxa_throw(exception as *mut _, &EXCEPTION_TYPE_INFO, exception_cleanup);
 }
 

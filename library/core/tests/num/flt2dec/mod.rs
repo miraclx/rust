@@ -1,14 +1,10 @@
-use std::mem::MaybeUninit;
-use std::{fmt, str};
-
-use core::num::flt2dec::{decode, DecodableFloat, Decoded, FullDecoded};
-use core::num::flt2dec::{round_up, Sign, MAX_SIG_DIGITS};
 use core::num::flt2dec::{
-    to_exact_exp_str, to_exact_fixed_str, to_shortest_exp_str, to_shortest_str,
+    DecodableFloat, Decoded, FullDecoded, MAX_SIG_DIGITS, Sign, decode, round_up, to_exact_exp_str,
+    to_exact_fixed_str, to_shortest_exp_str, to_shortest_str,
 };
 use core::num::fmt::{Formatted, Part};
-
-pub use test::Bencher;
+use std::mem::MaybeUninit;
+use std::{fmt, str};
 
 mod estimator;
 mod strategy {

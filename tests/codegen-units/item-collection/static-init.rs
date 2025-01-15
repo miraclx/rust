@@ -1,12 +1,12 @@
-// compile-flags:-Zprint-mono-items=eager -Zpolymorphize=on
+//@ compile-flags:-Zprint-mono-items=eager
 
 #![feature(start)]
 
-pub static FN : fn() = foo::<i32>;
+pub static FN: fn() = foo::<i32>;
 
-pub fn foo<T>() { }
+pub fn foo<T>() {}
 
-//~ MONO_ITEM fn foo::<T>
+//~ MONO_ITEM fn foo::<i32>
 //~ MONO_ITEM static FN
 
 //~ MONO_ITEM fn start

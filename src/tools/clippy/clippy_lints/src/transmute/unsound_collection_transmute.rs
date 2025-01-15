@@ -1,5 +1,5 @@
-use super::utils::is_layout_incompatible;
 use super::UNSOUND_COLLECTION_TRANSMUTE;
+use super::utils::is_layout_incompatible;
 use clippy_utils::diagnostics::span_lint;
 use rustc_hir::Expr;
 use rustc_lint::LateContext;
@@ -37,7 +37,7 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>, from_ty: Ty
                     cx,
                     UNSOUND_COLLECTION_TRANSMUTE,
                     e.span,
-                    &format!("transmute from `{from_ty}` to `{to_ty}` with mismatched layout is unsound"),
+                    format!("transmute from `{from_ty}` to `{to_ty}` with mismatched layout is unsound"),
                 );
                 true
             } else {

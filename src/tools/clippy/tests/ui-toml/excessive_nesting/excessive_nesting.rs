@@ -1,15 +1,19 @@
-//@aux-build:proc_macros.rs
+//@aux-build:../../ui/auxiliary/proc_macros.rs
 #![rustfmt::skip]
 #![feature(custom_inner_attributes)]
-#![allow(unused)]
-#![allow(clippy::let_and_return)]
-#![allow(clippy::redundant_closure_call)]
-#![allow(clippy::no_effect)]
-#![allow(clippy::unnecessary_operation)]
-#![allow(clippy::never_loop)]
-#![allow(clippy::needless_if)]
 #![warn(clippy::excessive_nesting)]
-#![allow(clippy::collapsible_if)]
+#![allow(
+    unused,
+    clippy::let_and_return,
+    clippy::redundant_closure_call,
+    clippy::no_effect,
+    clippy::unnecessary_operation,
+    clippy::never_loop,
+    clippy::needless_if,
+    clippy::collapsible_if,
+    clippy::blocks_in_conditions,
+    clippy::single_match,
+)]
 
 #[macro_use]
 extern crate proc_macros;
@@ -156,7 +160,7 @@ fn main() {
     for i in {{{{xx}}}} {{{{{{{{}}}}}}}}
 
     while let Some(i) = {{{{{{Some(1)}}}}}} {{{{{{{}}}}}}}
-    
+
     while {{{{{{{{true}}}}}}}} {{{{{{{{{}}}}}}}}}
 
     let d = D { d: {{{{{{{{{{{{{{{{{{{{{{{3}}}}}}}}}}}}}}}}}}}}}}} };

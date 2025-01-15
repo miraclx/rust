@@ -1,7 +1,6 @@
-// compile-flags: -C no-prepopulate-passes -Copt-level=0
+//@ compile-flags: -C no-prepopulate-passes -Copt-level=0
 //
-// only-x86_64
-// ignore-windows
+//@ only-x86_64
 
 #![crate_type = "lib"]
 

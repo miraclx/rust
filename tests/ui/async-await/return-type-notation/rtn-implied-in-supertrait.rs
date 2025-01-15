@@ -1,8 +1,7 @@
-// edition:2021
-// check-pass
+//@ edition:2021
+//@ check-pass
 
-#![feature(async_fn_in_trait, return_position_impl_trait_in_trait, return_type_notation)]
-//~^ WARN the feature `return_type_notation` is incomplete
+#![feature(return_type_notation)]
 
 use std::future::Future;
 
@@ -16,7 +15,7 @@ trait Foo {
     async fn bar(&self) -> i32;
 }
 
-trait SendFoo: Foo<bar(): Send> + Send {}
+trait SendFoo: Foo<bar(..): Send> + Send {}
 
 fn foobar(foo: impl SendFoo) -> JoinHandle<i32> {
     spawn(async move {

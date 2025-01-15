@@ -4,21 +4,13 @@
 #[cfg(test)]
 mod tests;
 
-use crate::backtrace::Backtrace;
-use crate::fmt::{self, Write};
-
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::error::Error;
 #[unstable(feature = "error_generic_member_access", issue = "99301")]
-pub use core::error::{request_ref, request_value, Request};
+pub use core::error::{Request, request_ref, request_value};
 
-mod private {
-    // This is a hack to prevent `type_id` from being overridden by `Error`
-    // implementations, since that can enable unsound downcasting.
-    #[unstable(feature = "error_type_id", issue = "60784")]
-    #[derive(Debug)]
-    pub struct Internal;
-}
+use crate::backtrace::Backtrace;
+use crate::fmt::{self, Write};
 
 /// An error reporter that prints an error and its sources.
 ///
@@ -242,7 +234,7 @@ impl<E> Report<E>
 where
     Report<E>: From<E>,
 {
-    /// Create a new `Report` from an input error.
+    /// Creates a new `Report` from an input error.
     #[unstable(feature = "error_reporter", issue = "90172")]
     pub fn new(error: E) -> Report<E> {
         Self::from(error)
@@ -437,7 +429,7 @@ impl<E> Report<E> {
     ///    1: rust_out::main::_doctest_main_src_error_rs_1158_0
     ///    2: rust_out::main
     ///    3: core::ops::function::FnOnce::call_once
-    ///    4: std::sys_common::backtrace::__rust_begin_short_backtrace
+    ///    4: std::sys::backtrace::__rust_begin_short_backtrace
     ///    5: std::rt::lang_start::{{closure}}
     ///    6: std::panicking::try
     ///    7: std::rt::lang_start_internal
@@ -508,13 +500,8 @@ where
         }
 
         if self.show_backtrace {
-            let backtrace = self.backtrace();
-
-            if let Some(backtrace) = backtrace {
-                let backtrace = backtrace.to_string();
-
-                f.write_str("\n\nStack backtrace:\n")?;
-                f.write_str(backtrace.trim_end())?;
+            if let Some(backtrace) = self.backtrace() {
+                write!(f, "\n\nStack backtrace:\n{}", backtrace.to_string().trim_end())?;
             }
         }
 

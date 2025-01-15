@@ -1,7 +1,7 @@
 use clippy_utils::diagnostics::{span_lint, span_lint_and_then};
 use clippy_utils::source::snippet;
 use clippy_utils::ty::implements_trait;
-use rustc_ast::{BindingAnnotation, Mutability};
+use rustc_ast::{BindingMode, Mutability};
 use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_lint::LateContext;
@@ -32,9 +32,10 @@ pub(super) fn check<'tcx>(
     filter_arg: &'tcx hir::Expr<'_>,
 ) {
     // lint if caller of `.filter().next()` is an Iterator
-    let recv_impls_iterator = cx.tcx.get_diagnostic_item(sym::Iterator).map_or(false, |id| {
-        implements_trait(cx, cx.typeck_results().expr_ty(recv), id, &[])
-    });
+    let recv_impls_iterator = cx
+        .tcx
+        .get_diagnostic_item(sym::Iterator)
+        .is_some_and(|id| implements_trait(cx, cx.typeck_results().expr_ty(recv), id, &[]));
     if recv_impls_iterator {
         let msg = "called `filter(..).next()` on an `Iterator`. This is more succinctly expressed by calling \
                    `.find(..)` instead";
@@ -44,8 +45,8 @@ pub(super) fn check<'tcx>(
             // add note if not multi-line
             span_lint_and_then(cx, FILTER_NEXT, expr.span, msg, |diag| {
                 let (applicability, pat) = if let Some(id) = path_to_local(recv)
-                    && let Some(hir::Node::Pat(pat)) = cx.tcx.hir().find(id)
-                    && let hir::PatKind::Binding(BindingAnnotation(_, Mutability::Not), _, ident, _) = pat.kind
+                    && let hir::Node::Pat(pat) = cx.tcx.hir_node(id)
+                    && let hir::PatKind::Binding(BindingMode(_, Mutability::Not), _, ident, _) = pat.kind
                 {
                     (Applicability::Unspecified, Some((pat.span, ident)))
                 } else {

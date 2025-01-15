@@ -2,12 +2,14 @@
 
 use std::{cmp, ops::Bound};
 
+use base_db::ra_salsa::Cycle;
 use hir_def::{
     data::adt::VariantData,
-    layout::{Integer, LayoutCalculator, ReprOptions, TargetDataLayout},
-    AdtId, EnumVariantId, LocalEnumVariantId, VariantId,
+    layout::{Integer, ReprOptions, TargetDataLayout},
+    AdtId, VariantId,
 };
-use la_arena::RawIdx;
+use intern::sym;
+use rustc_index::IndexVec;
 use smallvec::SmallVec;
 use triomphe::Arc;
 
@@ -21,7 +23,7 @@ use crate::{
 use super::LayoutCx;
 
 pub(crate) fn struct_variant_idx() -> RustcEnumVariantIdx {
-    RustcEnumVariantIdx(LocalEnumVariantId::from_raw(RawIdx::from(0)))
+    RustcEnumVariantIdx(0)
 }
 
 pub fn layout_of_adt_query(
@@ -31,11 +33,11 @@ pub fn layout_of_adt_query(
     trait_env: Arc<TraitEnvironment>,
 ) -> Result<Arc<Layout>, LayoutError> {
     let krate = trait_env.krate;
-    let Some(target) = db.target_data_layout(krate) else {
+    let Ok(target) = db.target_data_layout(krate) else {
         return Err(LayoutError::TargetLayoutNotAvailable);
     };
-    let cx = LayoutCx { target: &target };
-    let dl = cx.current_data_layout();
+    let dl = &*target;
+    let cx = LayoutCx::new(dl);
     let handle_variant = |def: VariantId, var: &VariantData| {
         var.fields()
             .iter()
@@ -60,12 +62,7 @@ pub fn layout_of_adt_query(
             let r = data
                 .variants
                 .iter()
-                .map(|(idx, v)| {
-                    handle_variant(
-                        EnumVariantId { parent: e, local_id: idx }.into(),
-                        &v.variant_data,
-                    )
-                })
+                .map(|&(v, _)| handle_variant(v.into(), &db.enum_variant_data(v).variant_data))
                 .collect::<Result<SmallVec<_>, _>>()?;
             (r, data.repr.unwrap_or_default())
         }
@@ -74,21 +71,20 @@ pub fn layout_of_adt_query(
         .iter()
         .map(|it| it.iter().map(|it| &**it).collect::<Vec<_>>())
         .collect::<SmallVec<[_; 1]>>();
-    let variants = variants.iter().map(|it| it.iter().collect()).collect();
+    let variants = variants.iter().map(|it| it.iter().collect()).collect::<IndexVec<_, _>>();
     let result = if matches!(def, AdtId::UnionId(..)) {
-        cx.layout_of_union(&repr, &variants).ok_or(LayoutError::Unknown)?
+        cx.calc.layout_of_union(&repr, &variants)?
     } else {
-        cx.layout_of_struct_or_enum(
+        cx.calc.layout_of_struct_or_enum(
             &repr,
             &variants,
             matches!(def, AdtId::EnumId(..)),
             is_unsafe_cell(db, def),
             layout_scalar_valid_range(db, def),
-            |min, max| repr_discr(&dl, &repr, min, max).unwrap_or((Integer::I8, false)),
+            |min, max| repr_discr(dl, &repr, min, max).unwrap_or((Integer::I8, false)),
             variants.iter_enumerated().filter_map(|(id, _)| {
                 let AdtId::EnumId(e) = def else { return None };
-                let d =
-                    db.const_eval_discriminant(EnumVariantId { parent: e, local_id: id.0 }).ok()?;
+                let d = db.const_eval_discriminant(db.enum_data(e).variants[id.0].0).ok()?;
                 Some((id, d))
             }),
             // FIXME: The current code for niche-filling relies on variant indices
@@ -105,10 +101,9 @@ pub fn layout_of_adt_query(
                 && variants
                     .iter()
                     .next()
-                    .and_then(|it| it.last().map(|it| !it.is_unsized()))
+                    .and_then(|it| it.iter().last().map(|it| !it.is_unsized()))
                     .unwrap_or(true),
-        )
-        .ok_or(LayoutError::SizeOverflow)?
+        )?
     };
     Ok(Arc::new(result))
 }
@@ -118,25 +113,36 @@ fn layout_scalar_valid_range(db: &dyn HirDatabase, def: AdtId) -> (Bound<u128>, 
     let get = |name| {
         let attr = attrs.by_key(name).tt_values();
         for tree in attr {
-            if let Some(it) = tree.token_trees.first() {
-                if let Ok(it) = it.to_string().parse() {
+            if let Some(it) = tree.iter().next_as_view() {
+                let text = it.to_string().replace('_', "");
+                let (text, base) = match text.as_bytes() {
+                    [b'0', b'x', ..] => (&text[2..], 16),
+                    [b'0', b'o', ..] => (&text[2..], 8),
+                    [b'0', b'b', ..] => (&text[2..], 2),
+                    _ => (&*text, 10),
+                };
+
+                if let Ok(it) = u128::from_str_radix(text, base) {
                     return Bound::Included(it);
                 }
             }
         }
         Bound::Unbounded
     };
-    (get("rustc_layout_scalar_valid_range_start"), get("rustc_layout_scalar_valid_range_end"))
+    (
+        get(&sym::rustc_layout_scalar_valid_range_start),
+        get(&sym::rustc_layout_scalar_valid_range_end),
+    )
 }
 
 pub fn layout_of_adt_recover(
     _: &dyn HirDatabase,
-    _: &[String],
+    _: &Cycle,
     _: &AdtId,
     _: &Substitution,
     _: &Arc<TraitEnvironment>,
 ) -> Result<Arc<Layout>, LayoutError> {
-    user_error!("infinite sized recursive type");
+    Err(LayoutError::RecursiveTypeWithoutIndirection)
 }
 
 /// Finds the appropriate Integer type and signedness for the given
@@ -160,11 +166,7 @@ fn repr_discr(
         let discr = Integer::from_attr(dl, ity);
         let fit = if ity.is_signed() { signed_fit } else { unsigned_fit };
         if discr < fit {
-            return Err(LayoutError::UserError(
-                "Integer::repr_discr: `#[repr]` hint too small for \
-                      discriminant range of enum "
-                    .to_string(),
-            ));
+            return Err(LayoutError::UserReprTooSmall);
         }
         return Ok((discr, ity.is_signed()));
     }

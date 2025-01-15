@@ -124,6 +124,12 @@ impl MoveStruct {
 }
 
 fn func() -> Option<i32> {
+    macro_rules! opt_none {
+        () => {
+            None
+        };
+    }
+
     fn f() -> Option<String> {
         Some(String::new())
     }
@@ -131,6 +137,39 @@ fn func() -> Option<i32> {
     if f().is_none() {
         return None;
     }
+
+    let _val = match f() {
+        Some(val) => val,
+        None => return None,
+    };
+
+    let s: &str = match &Some(String::new()) {
+        Some(v) => v,
+        None => return None,
+    };
+
+    match f() {
+        Some(val) => val,
+        None => return None,
+    };
+
+    match opt_none!() {
+        Some(x) => x,
+        None => return None,
+    };
+
+    match f() {
+        Some(x) => x,
+        None => return opt_none!(),
+    };
+
+    match f() {
+        Some(val) => {
+            println!("{val}");
+            val
+        },
+        None => return None,
+    };
 
     Some(0)
 }
@@ -145,6 +184,16 @@ fn result_func(x: Result<i32, i32>) -> Result<i32, i32> {
     if x.is_err() {
         return x;
     }
+
+    let _val = match func_returning_result() {
+        Ok(val) => val,
+        Err(err) => return Err(err),
+    };
+
+    match func_returning_result() {
+        Ok(val) => val,
+        Err(err) => return Err(err),
+    };
 
     // No warning
     let y = if let Ok(x) = x {
@@ -187,6 +236,28 @@ fn result_func(x: Result<i32, i32>) -> Result<i32, i32> {
     }
 
     Ok(y)
+}
+
+fn infer_check() {
+    let closure = |x: Result<u8, ()>| {
+        // `?` would fail here, as it expands to `Err(val.into())` which is not constrained.
+        let _val = match x {
+            Ok(val) => val,
+            Err(val) => return Err(val),
+        };
+
+        Ok(())
+    };
+
+    let closure = |x: Result<u8, ()>| -> Result<(), _> {
+        // `?` would fail here, as it expands to `Err(val.into())` which is not constrained.
+        let _val = match x {
+            Ok(val) => val,
+            Err(val) => return Err(val),
+        };
+
+        Ok(())
+    };
 }
 
 // see issue #8019
@@ -311,5 +382,51 @@ const fn issue9175(option: Option<()>) -> Option<()> {
         return None;
     }
     //stuff
+    Some(())
+}
+
+fn issue12337() -> Option<i32> {
+    let _: Option<i32> = try {
+        let Some(_) = Some(42) else {
+            return None;
+        };
+        123
+    };
+    Some(42)
+}
+
+fn issue11983(option: &Option<String>) -> Option<()> {
+    // Don't lint, `&Option` dose not impl `Try`.
+    let Some(v) = option else { return None };
+
+    let opt = Some(String::new());
+    // Don't lint, `branch` method in `Try` takes ownership of `opt`,
+    // and `(&opt)?` also doesn't work since it's `&Option`.
+    let Some(v) = &opt else { return None };
+    let mov = opt;
+
+    Some(())
+}
+
+struct Foo {
+    owned: Option<String>,
+}
+struct Bar {
+    foo: Foo,
+}
+#[allow(clippy::disallowed_names)]
+fn issue12412(foo: &Foo, bar: &Bar) -> Option<()> {
+    // Don't lint, `owned` is behind a shared reference.
+    let Some(v) = &foo.owned else {
+        return None;
+    };
+    // Don't lint, `owned` is behind a shared reference.
+    let Some(v) = &bar.foo.owned else {
+        return None;
+    };
+    // lint
+    let Some(v) = bar.foo.owned.clone() else {
+        return None;
+    };
     Some(())
 }

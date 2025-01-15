@@ -4,8 +4,9 @@ use std::ffi::{OsStr, OsString};
 use rand::distributions::{Alphanumeric, DistString};
 
 mod common;
-use common::test_rng;
 use std::thread;
+
+use common::test_rng;
 
 #[track_caller]
 fn make_rand_name() -> OsString {
@@ -121,19 +122,19 @@ fn env_home_dir() {
 
             assert!(home_dir().is_some());
 
-            set_var("HOME", "/home/MountainView");
-            assert_eq!(home_dir(), Some(PathBuf::from("/home/MountainView")));
-
-            remove_var("HOME");
+            set_var("HOME", "/home/PaloAlto");
+            assert_ne!(home_dir(), Some(PathBuf::from("/home/PaloAlto")), "HOME must not be used");
 
             set_var("USERPROFILE", "/home/MountainView");
             assert_eq!(home_dir(), Some(PathBuf::from("/home/MountainView")));
 
-            set_var("HOME", "/home/MountainView");
-            set_var("USERPROFILE", "/home/PaloAlto");
+            remove_var("HOME");
+
             assert_eq!(home_dir(), Some(PathBuf::from("/home/MountainView")));
 
-            remove_var("HOME");
+            set_var("USERPROFILE", "");
+            assert_ne!(home_dir(), Some(PathBuf::from("")), "Empty USERPROFILE must be ignored");
+
             remove_var("USERPROFILE");
 
             if let Some(oldhome) = oldhome { set_var("HOME", oldhome); }

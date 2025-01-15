@@ -119,7 +119,7 @@ To propose addition of a new target, open a pull request on [`rust-lang/rust`]:
   Link to the created description page.
 - Ensure the pull request is assigned to a member of the [Rust compiler team][rust_compiler_team] by commenting:
   ```text
-  r? compiler-team
+  r? compiler
   ```
 
 [tier3example]: https://github.com/rust-lang/rust/pull/94872
@@ -246,6 +246,9 @@ approved by the appropriate team for that shared code before acceptance.
     introducing unconditional uses of features that another variation of the
     target may not have; use conditional compilation or runtime detection, as
     appropriate, to let each target run code supported by that target.
+- Tier 3 targets must be able to produce assembly using at least one of
+  rustc's supported backends from any host target. (Having support in a fork
+  of the backend is not sufficient, it must be upstream.)
 
 If a tier 3 target stops meeting these requirements, or the target maintainers
 no longer have interest or time, or the target shows no signs of activity and

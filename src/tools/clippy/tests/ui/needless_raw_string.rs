@@ -1,6 +1,5 @@
 #![allow(clippy::needless_raw_string_hashes, clippy::no_effect, unused)]
 #![warn(clippy::needless_raw_strings)]
-#![feature(c_str_literals)]
 
 fn main() {
     r#"aaa"#;
@@ -9,8 +8,26 @@ fn main() {
     br#"aaa"#;
     br#""aaa""#;
     br#"\s"#;
-    // currently disabled: https://github.com/rust-lang/rust/issues/113333
-    // cr#"aaa"#;
-    // cr#""aaa""#;
-    // cr#"\s"#;
+    cr#"aaa"#;
+    cr#""aaa""#;
+    cr#"\s"#;
+
+    r#"
+        a
+        multiline
+        string
+    "#;
+
+    r"no hashes";
+    br"no hashes";
+    cr"no hashes";
+}
+
+fn issue_13503() {
+    println!(r"SELECT * FROM posts");
+    println!(r#"SELECT * FROM posts"#);
+    println!(r##"SELECT * FROM "posts""##);
+
+    // Test arguments as well
+    println!("{}", r"foobar".len());
 }

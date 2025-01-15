@@ -1,3 +1,4 @@
+use hir::GenericParam;
 use ide_db::{base_db::Upcast, defs::Definition, helpers::pick_best_token, RootDatabase};
 use syntax::{ast, match_ast, AstNode, SyntaxKind::*, SyntaxToken, T};
 
@@ -20,7 +21,7 @@ pub(crate) fn goto_type_definition(
 ) -> Option<RangeInfo<Vec<NavigationTarget>>> {
     let sema = hir::Semantics::new(db);
 
-    let file: ast::SourceFile = sema.parse(file_id);
+    let file: ast::SourceFile = sema.parse_guess_edition(file_id);
     let token: SyntaxToken =
         pick_best_token(file.syntax().token_at_offset(offset), |kind| match kind {
             IDENT | INT_NUMBER | T![self] => 2,
@@ -30,14 +31,45 @@ pub(crate) fn goto_type_definition(
 
     let mut res = Vec::new();
     let mut push = |def: Definition| {
-        if let Some(nav) = def.try_to_nav(db) {
-            if !res.contains(&nav) {
-                res.push(nav);
+        if let Some(navs) = def.try_to_nav(db) {
+            for nav in navs {
+                if !res.contains(&nav) {
+                    res.push(nav);
+                }
             }
         }
     };
+    let mut process_ty = |ty: hir::Type| {
+        // collect from each `ty` into the `res` result vec
+        let ty = ty.strip_references();
+        ty.walk(db, |t| {
+            if let Some(adt) = t.as_adt() {
+                push(adt.into());
+            } else if let Some(trait_) = t.as_dyn_trait() {
+                push(trait_.into());
+            } else if let Some(traits) = t.as_impl_traits(db) {
+                traits.for_each(|it| push(it.into()));
+            } else if let Some(trait_) = t.as_associated_type_parent_trait(db) {
+                push(trait_.into());
+            }
+        });
+    };
+    if let Some((range, resolution)) = sema.check_for_format_args_template(token.clone(), offset) {
+        if let Some(ty) = resolution.and_then(|res| match Definition::from(res) {
+            Definition::Const(it) => Some(it.ty(db)),
+            Definition::Static(it) => Some(it.ty(db)),
+            Definition::GenericParam(GenericParam::ConstParam(it)) => Some(it.ty(db)),
+            Definition::Local(it) => Some(it.ty(db)),
+            Definition::Adt(hir::Adt::Struct(it)) => Some(it.ty(db)),
+            _ => None,
+        }) {
+            process_ty(ty);
+        }
+        return Some(RangeInfo::new(range, res));
+    }
+
     let range = token.text_range();
-    sema.descend_into_macros(token, offset)
+    sema.descend_into_macros_no_opaque(token)
         .into_iter()
         .filter_map(|token| {
             let ty = sema
@@ -75,27 +107,13 @@ pub(crate) fn goto_type_definition(
                 });
             ty
         })
-        .for_each(|ty| {
-            // collect from each `ty` into the `res` result vec
-            let ty = ty.strip_references();
-            ty.walk(db, |t| {
-                if let Some(adt) = t.as_adt() {
-                    push(adt.into());
-                } else if let Some(trait_) = t.as_dyn_trait() {
-                    push(trait_.into());
-                } else if let Some(traits) = t.as_impl_traits(db) {
-                    traits.for_each(|it| push(it.into()));
-                } else if let Some(trait_) = t.as_associated_type_parent_trait(db) {
-                    push(trait_.into());
-                }
-            });
-        });
+        .for_each(process_ty);
     Some(RangeInfo::new(range, res))
 }
 
 #[cfg(test)]
 mod tests {
-    use ide_db::base_db::FileRange;
+    use ide_db::FileRange;
     use itertools::Itertools;
 
     use crate::fixture;
@@ -325,6 +343,42 @@ struct Baz<T>(T);
      //^^^
 
 fn foo(x$0: Bar<Baz<Foo>, Baz<usize>) {}
+"#,
+        );
+    }
+
+    #[test]
+    fn implicit_format_args() {
+        check(
+            r#"
+//- minicore: fmt
+struct Bar;
+    // ^^^
+    fn test() {
+    let a = Bar;
+    format_args!("hello {a$0}");
+}
+"#,
+        );
+        check(
+            r#"
+//- minicore: fmt
+struct Bar;
+    // ^^^
+    fn test() {
+    format_args!("hello {Bar$0}");
+}
+"#,
+        );
+        check(
+            r#"
+//- minicore: fmt
+struct Bar;
+    // ^^^
+const BAR: Bar = Bar;
+fn test() {
+    format_args!("hello {BAR$0}");
+}
 "#,
         );
     }

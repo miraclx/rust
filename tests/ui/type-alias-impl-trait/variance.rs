@@ -5,46 +5,75 @@
 trait Captures<'a> {}
 impl<T> Captures<'_> for T {}
 
-type NotCapturedEarly<'a> = impl Sized; //~ [o]
+type NotCapturedEarly<'a> = impl Sized; //~ ['a: *, 'a: o]
+//~^ ERROR: unconstrained opaque type
 
-type CapturedEarly<'a> = impl Sized + Captures<'a>; //~ [o]
+type CapturedEarly<'a> = impl Sized + Captures<'a>; //~ ['a: *, 'a: o]
+//~^ ERROR: unconstrained opaque type
 
-type NotCapturedLate<'a> = dyn for<'b> Iterator<Item = impl Sized>; //~ [o]
+type NotCapturedLate<'a> = dyn for<'b> Iterator<Item = impl Sized>; //~ ['a: *, 'a: o, 'b: o]
+//~^ ERROR `impl Trait` cannot capture higher-ranked lifetime from `dyn` type
+//~| ERROR: unconstrained opaque type
 
-type CapturedLate<'a> = dyn for<'b> Iterator<Item = impl Sized + Captures<'b>>; //~ [o]
+type Captured<'a> = dyn for<'b> Iterator<Item = impl Sized + Captures<'a>>; //~ ['a: *, 'a: o, 'b: o]
+//~^ ERROR `impl Trait` cannot capture higher-ranked lifetime from `dyn` type
+//~| ERROR: unconstrained opaque type
 
-type Captured<'a> = dyn for<'b> Iterator<Item = impl Sized + Captures<'a> + Captures<'b>>; //~ [o]
-
-type Bar<'a, 'b: 'b, T> = impl Sized; //~ ERROR [o, o, o]
+type Bar<'a, 'b: 'b, T> = impl Sized; //~ ERROR ['a: *, 'b: *, T: o, 'a: o, 'b: o]
+//~^ ERROR: unconstrained opaque type
 
 trait Foo<'i> {
-    type ImplicitCapturedEarly<'a>;
+    type ImplicitCapture<'a>;
 
-    type ExplicitCaptureEarly<'a>;
+    type ExplicitCaptureFromHeader<'a>;
 
-    type ImplicitCaptureLate<'a>;
-
-    type ExplicitCaptureLate<'a>;
+    type ExplicitCaptureFromGat<'a>;
 }
 
 impl<'i> Foo<'i> for &'i () {
-    type ImplicitCapturedEarly<'a> = impl Sized; //~ [o, o]
+    type ImplicitCapture<'a> = impl Sized; //~ ['i: *, 'a: *, 'i: o, 'a: o]
+    //~^ ERROR: unconstrained opaque type
 
-    type ExplicitCaptureEarly<'a> = impl Sized + Captures<'i>; //~ [o, o]
+    type ExplicitCaptureFromHeader<'a> = impl Sized + Captures<'i>; //~ ['i: *, 'a: *, 'i: o, 'a: o]
+    //~^ ERROR: unconstrained opaque type
 
-    type ImplicitCaptureLate<'a> = impl Sized; //~ [o, o]
-
-    type ExplicitCaptureLate<'a> = impl Sized + Captures<'a>; //~ [o, o]
+    type ExplicitCaptureFromGat<'a> = impl Sized + Captures<'a>; //~ ['i: *, 'a: *, 'i: o, 'a: o]
+    //~^ ERROR: unconstrained opaque type
 }
 
 impl<'i> Foo<'i> for () {
-    type ImplicitCapturedEarly<'a> = impl Sized; //~ [o, o]
+    type ImplicitCapture<'a> = impl Sized; //~ ['i: *, 'a: *, 'i: o, 'a: o]
+    //~^ ERROR: unconstrained opaque type
 
-    type ExplicitCaptureEarly<'a> = impl Sized + Captures<'i>; //~ [o, o]
+    type ExplicitCaptureFromHeader<'a> = impl Sized + Captures<'i>; //~ ['i: *, 'a: *, 'i: o, 'a: o]
+    //~^ ERROR: unconstrained opaque type
 
-    type ImplicitCaptureLate<'a> = impl Sized; //~ [o, o]
+    type ExplicitCaptureFromGat<'a> = impl Sized + Captures<'a>; //~ ['i: *, 'a: *, 'i: o, 'a: o]
+    //~^ ERROR: unconstrained opaque type
+}
 
-    type ExplicitCaptureLate<'a> = impl Sized + Captures<'a>; //~ [o, o]
+trait Nesting<'a> {
+    type Output;
+}
+impl<'a> Nesting<'a> for &'a () {
+    type Output = &'a ();
+}
+type NestedDeeply<'a> =
+    impl Nesting< //~ ['a: *, 'a: o]
+        'a,
+        Output = impl Nesting< //~ ['a: *, 'a: o]
+            'a,
+            Output = impl Nesting< //~ ['a: *, 'a: o]
+                'a,
+                Output = impl Nesting< //~ ['a: *, 'a: o]
+                    'a,
+                    Output = impl Nesting<'a> //~ ['a: *, 'a: o]
+                >
+            >,
+        >,
+    >;
+fn test<'a>() -> NestedDeeply<'a> {
+    &()
 }
 
 fn main() {}

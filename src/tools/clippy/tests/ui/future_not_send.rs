@@ -1,6 +1,7 @@
 #![warn(clippy::future_not_send)]
 
 use std::cell::Cell;
+use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -59,7 +60,24 @@ where
 {
     let rt = &t;
     async { true }.await;
+    let _ = rt;
     t
+}
+
+async fn maybe_send_generic_future<T>(t: T) -> T {
+    async { true }.await;
+    t
+}
+
+async fn maybe_send_generic_future2<F: Fn() -> Fut, Fut: Future>(f: F) {
+    async { true }.await;
+    let res = f();
+    async { true }.await;
+}
+
+async fn generic_future_always_unsend<T>(_: Rc<T>) {
+    //~^ ERROR: future cannot be sent between threads safely
+    async { true }.await;
 }
 
 async fn generic_future_send<T>(t: T)
@@ -70,7 +88,6 @@ where
 }
 
 async fn unclear_future<T>(t: T) {}
-//~^ ERROR: future cannot be sent between threads safely
 
 fn main() {
     let rc = Rc::new([1, 2, 3]);

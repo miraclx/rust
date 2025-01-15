@@ -1,13 +1,14 @@
 // Verifies that no_sanitize attribute prevents inlining when
 // given sanitizer is enabled, but has no effect on inlining otherwise.
 //
-// needs-sanitizer-address
-// needs-sanitizer-leak
-// revisions: ASAN LSAN
-//[ASAN] compile-flags: -Zsanitizer=address -C opt-level=3 -Z mir-opt-level=4
-//[LSAN] compile-flags: -Zsanitizer=leak    -C opt-level=3 -Z mir-opt-level=4
+//@ needs-sanitizer-address
+//@ needs-sanitizer-leak
+//@ revisions: ASAN LSAN
+//@       compile-flags: -Copt-level=3 -Zmir-opt-level=4 -Ctarget-feature=-crt-static
+//@[ASAN] compile-flags: -Zsanitizer=address
+//@[LSAN] compile-flags: -Zsanitizer=leak
 
-#![crate_type="lib"]
+#![crate_type = "lib"]
 #![feature(no_sanitize)]
 
 // ASAN-LABEL: define void @test
@@ -15,7 +16,7 @@
 // ASAN:       }
 //
 // LSAN-LABEL: define void @test
-// LSAN-NO:      call
+// LSAN-NOT:     call
 // LSAN:       }
 #[no_mangle]
 pub fn test(n: &mut u32) {

@@ -2,6 +2,8 @@
 //@[edition2018] edition:2018
 //@[edition2021] edition:2021
 
+//@no-rustfix: need to change the suggestion to a multipart suggestion
+
 #![warn(clippy::manual_assert)]
 #![allow(dead_code, unused_doc_comments)]
 #![allow(clippy::nonminimal_bool, clippy::uninlined_format_args, clippy::useless_vec)]
@@ -81,5 +83,15 @@ fn issue7730(a: u8) {
         comment */
         /// Doc comment
         panic!("panic with comment") // comment after `panic!`
+    }
+}
+
+fn issue12505() {
+    struct Foo<T, const N: usize>(T);
+
+    impl<T, const N: usize> Foo<T, N> {
+        const BAR: () = if N == 0 {
+            panic!()
+        };
     }
 }

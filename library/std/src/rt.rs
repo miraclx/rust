@@ -16,16 +16,15 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(unused_macros)]
 
-use crate::ffi::CString;
-
-// Re-export some of our utilities which are expected by other crates.
+#[rustfmt::skip]
 pub use crate::panicking::{begin_panic, panic_count};
 pub use core::panicking::{panic_display, panic_fmt};
 
+#[rustfmt::skip]
+use crate::any::Any;
 use crate::sync::Once;
-use crate::sys;
-use crate::sys_common::thread_info;
-use crate::thread::Thread;
+use crate::thread::{self, Thread};
+use crate::{mem, panic, sys};
 
 // Prints to the "panic output", depending on the platform this may be:
 // - the standard error output
@@ -68,6 +67,11 @@ macro_rules! rtunwrap {
     };
 }
 
+fn handle_rt_panic<T>(e: Box<dyn Any + Send>) -> T {
+    mem::forget(e);
+    rtabort!("initialization or cleanup bug");
+}
+
 // One-time runtime initialization.
 // Runs before `main`.
 // SAFETY: must be called only once during runtime initialization.
@@ -77,7 +81,7 @@ macro_rules! rtunwrap {
 //
 // Since 2014, the Rust runtime on Unix has set the `SIGPIPE` handler to
 // `SIG_IGN`. Applications have good reasons to want a different behavior
-// though, so there is a `#[unix_sigpipe = "..."]` attribute on `fn main()` that
+// though, so there is a `-Zon-broken-pipe` compiler flag that
 // can be used to select how `SIGPIPE` shall be setup (if changed at all) before
 // `fn main()` is called. See <https://github.com/rust-lang/rust/issues/97889>
 // for more info.
@@ -93,17 +97,43 @@ macro_rules! rtunwrap {
 // `compiler/rustc_session/src/config/sigpipe.rs`.
 #[cfg_attr(test, allow(dead_code))]
 unsafe fn init(argc: isize, argv: *const *const u8, sigpipe: u8) {
+    #[cfg_attr(target_os = "teeos", allow(unused_unsafe))]
     unsafe {
-        sys::init(argc, argv, sigpipe);
+        sys::init(argc, argv, sigpipe)
+    };
 
-        let main_guard = sys::thread::guard::init();
-        // Next, set up the current Thread with the guard information we just
-        // created. Note that this isn't necessary in general for new threads,
-        // but we just do this to name the main thread and to give it correct
-        // info about the stack bounds.
-        let thread = Thread::new(Some(rtunwrap!(Ok, CString::new("main"))));
-        thread_info::set(main_guard, thread);
+    // Set up the current thread handle to give it the right name.
+    //
+    // When code running before main uses `ReentrantLock` (for example by
+    // using `println!`), the thread ID can become initialized before we
+    // create this handle. Since `set_current` fails when the ID of the
+    // handle does not match the current ID, we should attempt to use the
+    // current thread ID here instead of unconditionally creating a new
+    // one. Also see #130210.
+    let thread = unsafe { Thread::new_main(thread::current_id()) };
+    if let Err(_thread) = thread::set_current(thread) {
+        // `thread::current` will create a new handle if none has been set yet.
+        // Thus, if someone uses it before main, this call will fail. That's a
+        // bad idea though, as we then cannot set the main thread name here.
+        //
+        // FIXME: detect the main thread in `thread::current` and use the
+        //        correct name there.
+        rtabort!("code running before main must not use thread::current");
     }
+}
+
+/// Clean up the thread-local runtime state. This *should* be run after all other
+/// code managed by the Rust runtime, but will not cause UB if that condition is
+/// not fulfilled. Also note that this function is not guaranteed to be run, but
+/// skipping it will cause leaks and therefore is to be avoided.
+pub(crate) fn thread_cleanup() {
+    // This function is run in situations where unwinding leads to an abort
+    // (think `extern "C"` functions). Abort here instead so that we can
+    // print a nice message.
+    panic::catch_unwind(|| {
+        crate::thread::drop_current();
+    })
+    .unwrap_or_else(handle_rt_panic);
 }
 
 // One-time runtime cleanup.
@@ -127,12 +157,7 @@ fn lang_start_internal(
     argc: isize,
     argv: *const *const u8,
     sigpipe: u8,
-) -> Result<isize, !> {
-    use crate::{mem, panic};
-    let rt_abort = move |e| {
-        mem::forget(e);
-        rtabort!("initialization or cleanup bug");
-    };
+) -> isize {
     // Guard against the code called by this function from unwinding outside of the Rust-controlled
     // code, which is UB. This is a requirement imposed by a combination of how the
     // `#[lang="start"]` attribute is implemented as well as by the implementation of the panicking
@@ -143,18 +168,36 @@ fn lang_start_internal(
     // panic is a std implementation bug. A quite likely one too, as there isn't any way to
     // prevent std from accidentally introducing a panic to these functions. Another is from
     // user code from `main` or, more nefariously, as described in e.g. issue #86030.
-    // SAFETY: Only called once during runtime initialization.
-    panic::catch_unwind(move || unsafe { init(argc, argv, sigpipe) }).map_err(rt_abort)?;
-    let ret_code = panic::catch_unwind(move || panic::catch_unwind(main).unwrap_or(101) as isize)
-        .map_err(move |e| {
-            mem::forget(e);
-            rtabort!("drop of the panic payload panicked");
+    //
+    // We use `catch_unwind` with `handle_rt_panic` instead of `abort_unwind` to make the error in
+    // case of a panic a bit nicer.
+    panic::catch_unwind(move || {
+        // SAFETY: Only called once during runtime initialization.
+        unsafe { init(argc, argv, sigpipe) };
+
+        let ret_code = panic::catch_unwind(main).unwrap_or_else(move |payload| {
+            // Carefully dispose of the panic payload.
+            let payload = panic::AssertUnwindSafe(payload);
+            panic::catch_unwind(move || drop({ payload }.0)).unwrap_or_else(move |e| {
+                mem::forget(e); // do *not* drop the 2nd payload
+                rtabort!("drop of the panic payload panicked");
+            });
+            // Return error code for panicking programs.
+            101
         });
-    panic::catch_unwind(cleanup).map_err(rt_abort)?;
-    ret_code
+        let ret_code = ret_code as isize;
+
+        cleanup();
+        // Guard against multiple threads calling `libc::exit` concurrently.
+        // See the documentation for `unique_thread_exit` for more information.
+        crate::sys::exit_guard::unique_thread_exit();
+
+        ret_code
+    })
+    .unwrap_or_else(handle_rt_panic)
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, doctest)))]
 #[lang = "start"]
 fn lang_start<T: crate::process::Termination + 'static>(
     main: fn() -> T,
@@ -162,11 +205,10 @@ fn lang_start<T: crate::process::Termination + 'static>(
     argv: *const *const u8,
     sigpipe: u8,
 ) -> isize {
-    let Ok(v) = lang_start_internal(
-        &move || crate::sys_common::backtrace::__rust_begin_short_backtrace(main).report().to_i32(),
+    lang_start_internal(
+        &move || crate::sys::backtrace::__rust_begin_short_backtrace(main).report().to_i32(),
         argc,
         argv,
         sigpipe,
-    );
-    v
+    )
 }

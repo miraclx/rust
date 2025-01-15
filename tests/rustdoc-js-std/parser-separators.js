@@ -5,7 +5,7 @@ const PARSED = [
         query: 'aaaaaa	b',
         elems: [
             {
-                name: 'aaaaaa\tb',
+                name: 'aaaaaa b',
                 fullPath: ['aaaaaa', 'b'],
                 pathWithoutLast: ['aaaaaa'],
                 pathLast: 'b',
@@ -14,9 +14,8 @@ const PARSED = [
             },
         ],
         foundElems: 1,
-        original: "aaaaaa	b",
+        userQuery: "aaaaaa b",
         returned: [],
-        userQuery: "aaaaaa	b",
         error: null,
     },
     {
@@ -40,9 +39,8 @@ const PARSED = [
             },
         ],
         foundElems: 2,
-        original: "aaaaaa,	b",
+        userQuery: "aaaaaa, b",
         returned: [],
-        userQuery: "aaaaaa,	b",
         error: null,
     },
     {
@@ -58,9 +56,8 @@ const PARSED = [
             },
         ],
         foundElems: 1,
-        original: "a b",
-        returned: [],
         userQuery: "a b",
+        returned: [],
         error: null,
     },
     {
@@ -84,16 +81,15 @@ const PARSED = [
             },
         ],
         foundElems: 2,
-        original: "a,b",
-        returned: [],
         userQuery: "a,b",
+        returned: [],
         error: null,
     },
     {
         query: 'a\tb',
         elems: [
             {
-                name: 'a\tb',
+                name: 'a b',
                 fullPath: ['a', 'b'],
                 pathWithoutLast: ['a'],
                 pathLast: 'b',
@@ -102,9 +98,8 @@ const PARSED = [
             },
         ],
         foundElems: 1,
-        original: "a\tb",
+        userQuery: "a b",
         returned: [],
-        userQuery: "a\tb",
         error: null,
     },
     {
@@ -128,9 +123,8 @@ const PARSED = [
             },
         ],
         foundElems: 1,
-        original: "a<b c>",
-        returned: [],
         userQuery: "a<b c>",
+        returned: [],
         error: null,
     },
     {
@@ -161,9 +155,8 @@ const PARSED = [
             },
         ],
         foundElems: 1,
-        original: "a<b,c>",
-        returned: [],
         userQuery: "a<b,c>",
+        returned: [],
         error: null,
     },
     {
@@ -176,7 +169,7 @@ const PARSED = [
                 pathLast: 'a',
                 generics: [
                     {
-                        name: 'b\tc',
+                        name: 'b c',
                         fullPath: ['b', 'c'],
                         pathWithoutLast: ['b'],
                         pathLast: 'c',
@@ -187,9 +180,8 @@ const PARSED = [
             },
         ],
         foundElems: 1,
-        original: "a<b\tc>",
+        userQuery: "a<b c>",
         returned: [],
-        userQuery: "a<b\tc>",
         error: null,
     },
 ];

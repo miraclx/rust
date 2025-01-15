@@ -174,6 +174,25 @@ mod issue_5729 {
     }
 }
 
+mod issue_11335 {
+    pub enum E<T> {
+        A(T),
+        B(T),
+    }
+
+    impl<T> E<T> {
+        pub fn inner(&self) -> &T {
+            let result = match self {
+                E::A(x) => x,
+                E::B(x) => x,
+            };
+
+            result
+            //~^ ERROR: returning the result of a `let` binding from a block
+        }
+    }
+}
+
 // https://github.com/rust-lang/rust-clippy/issues/11167
 macro_rules! fn_in_macro {
     ($b:block) => {
@@ -183,5 +202,46 @@ macro_rules! fn_in_macro {
 fn_in_macro!({
     return 1;
 });
+
+fn issue9150() -> usize {
+    let x = 1;
+    #[cfg(any())]
+    panic!("can't see me");
+    x
+}
+
+fn issue12801() {
+    fn left_is_if() -> String {
+        let s = if true { "a".to_string() } else { "b".to_string() } + "c";
+        s
+        //~^ ERROR: returning the result of a `let` binding from a block
+    }
+
+    fn no_par_needed() -> String {
+        let s = "c".to_string() + if true { "a" } else { "b" };
+        s
+        //~^ ERROR: returning the result of a `let` binding from a block
+    }
+
+    fn conjunctive_blocks() -> String {
+        let s = { "a".to_string() } + "b" + { "c" } + "d";
+        s
+        //~^ ERROR: returning the result of a `let` binding from a block
+    }
+
+    #[allow(clippy::overly_complex_bool_expr)]
+    fn other_ops() {
+        let _ = || {
+            let s = if true { 2 } else { 3 } << 4;
+            s
+            //~^ ERROR: returning the result of a `let` binding from a block
+        };
+        let _ = || {
+            let s = { true } || { false } && { 2 <= 3 };
+            s
+            //~^ ERROR: returning the result of a `let` binding from a block
+        };
+    }
+}
 
 fn main() {}

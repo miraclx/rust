@@ -4,16 +4,14 @@
 // switch to use those structures instead.
 
 use std::fmt::{self, Write};
-use std::mem;
-use std::ops;
+use std::{mem, ops};
 
-use rustc_ast::{LitKind, MetaItem, MetaItemKind, NestedMetaItem};
+use rustc_ast::{LitKind, MetaItem, MetaItemInner, MetaItemKind, MetaItemLit};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_feature::Features;
 use rustc_session::parse::ParseSess;
-use rustc_span::symbol::{sym, Symbol};
-
 use rustc_span::Span;
+use rustc_span::symbol::{Symbol, sym};
 
 use crate::html::escape::Escape;
 
@@ -43,14 +41,18 @@ pub(crate) struct InvalidCfgError {
 }
 
 impl Cfg {
-    /// Parses a `NestedMetaItem` into a `Cfg`.
+    /// Parses a `MetaItemInner` into a `Cfg`.
     fn parse_nested(
-        nested_cfg: &NestedMetaItem,
+        nested_cfg: &MetaItemInner,
         exclude: &FxHashSet<Cfg>,
     ) -> Result<Option<Cfg>, InvalidCfgError> {
         match nested_cfg {
-            NestedMetaItem::MetaItem(ref cfg) => Cfg::parse_without(cfg, exclude),
-            NestedMetaItem::Lit(ref lit) => {
+            MetaItemInner::MetaItem(ref cfg) => Cfg::parse_without(cfg, exclude),
+            MetaItemInner::Lit(MetaItemLit { kind: LitKind::Bool(b), .. }) => match *b {
+                true => Ok(Some(Cfg::True)),
+                false => Ok(Some(Cfg::False)),
+            },
+            MetaItemInner::Lit(ref lit) => {
                 Err(InvalidCfgError { msg: "unexpected literal", span: lit.span })
             }
         }
@@ -88,11 +90,11 @@ impl Cfg {
             },
             MetaItemKind::List(ref items) => {
                 let orig_len = items.len();
-                let sub_cfgs =
+                let mut sub_cfgs =
                     items.iter().filter_map(|i| Cfg::parse_nested(i, exclude).transpose());
                 let ret = match name {
-                    sym::all => sub_cfgs.fold(Ok(Cfg::True), |x, y| Ok(x? & y?)),
-                    sym::any => sub_cfgs.fold(Ok(Cfg::False), |x, y| Ok(x? | y?)),
+                    sym::all => sub_cfgs.try_fold(Cfg::True, |x, y| Ok(x & y?)),
+                    sym::any => sub_cfgs.try_fold(Cfg::False, |x, y| Ok(x | y?)),
                     sym::not => {
                         if orig_len == 1 {
                             let mut sub_cfgs = sub_cfgs.collect::<Vec<_>>();
@@ -122,26 +124,26 @@ impl Cfg {
     ///
     /// If the content is not properly formatted, it will return an error indicating what and where
     /// the error is.
-    pub(crate) fn parse(cfg: &MetaItem) -> Result<Cfg, InvalidCfgError> {
-        Self::parse_without(cfg, &FxHashSet::default()).map(|ret| ret.unwrap())
+    pub(crate) fn parse(cfg: &MetaItemInner) -> Result<Cfg, InvalidCfgError> {
+        Self::parse_nested(cfg, &FxHashSet::default()).map(|ret| ret.unwrap())
     }
 
     /// Checks whether the given configuration can be matched in the current session.
     ///
     /// Equivalent to `attr::cfg_matches`.
     // FIXME: Actually make use of `features`.
-    pub(crate) fn matches(&self, parse_sess: &ParseSess, features: Option<&Features>) -> bool {
+    pub(crate) fn matches(&self, psess: &ParseSess, features: Option<&Features>) -> bool {
         match *self {
             Cfg::False => false,
             Cfg::True => true,
-            Cfg::Not(ref child) => !child.matches(parse_sess, features),
+            Cfg::Not(ref child) => !child.matches(psess, features),
             Cfg::All(ref sub_cfgs) => {
-                sub_cfgs.iter().all(|sub_cfg| sub_cfg.matches(parse_sess, features))
+                sub_cfgs.iter().all(|sub_cfg| sub_cfg.matches(psess, features))
             }
             Cfg::Any(ref sub_cfgs) => {
-                sub_cfgs.iter().any(|sub_cfg| sub_cfg.matches(parse_sess, features))
+                sub_cfgs.iter().any(|sub_cfg| sub_cfg.matches(psess, features))
             }
-            Cfg::Cfg(name, value) => parse_sess.config.contains(&(name, value)),
+            Cfg::Cfg(name, value) => psess.config.contains(&(name, value)),
         }
     }
 
@@ -164,8 +166,8 @@ impl Cfg {
     /// Renders the configuration for human display, as a short HTML description.
     pub(crate) fn render_short_html(&self) -> String {
         let mut msg = Display(self, Format::ShortHtml).to_string();
-        if self.should_capitalize_first_letter() &&
-            let Some(i) = msg.find(|c: char| c.is_ascii_alphanumeric())
+        if self.should_capitalize_first_letter()
+            && let Some(i) = msg.find(|c: char| c.is_ascii_alphanumeric())
         {
             msg[i..i + 1].make_ascii_uppercase();
         }
@@ -224,30 +226,28 @@ impl Cfg {
     /// `Cfg`.
     ///
     /// See `tests::test_simplify_with` for examples.
-    pub(crate) fn simplify_with(&self, assume: &Cfg) -> Option<Cfg> {
+    pub(crate) fn simplify_with(&self, assume: &Self) -> Option<Self> {
         if self == assume {
-            return None;
-        }
-
-        if let Cfg::All(a) = self {
+            None
+        } else if let Cfg::All(a) = self {
             let mut sub_cfgs: Vec<Cfg> = if let Cfg::All(b) = assume {
                 a.iter().filter(|a| !b.contains(a)).cloned().collect()
             } else {
                 a.iter().filter(|&a| a != assume).cloned().collect()
             };
             let len = sub_cfgs.len();
-            return match len {
+            match len {
                 0 => None,
                 1 => sub_cfgs.pop(),
                 _ => Some(Cfg::All(sub_cfgs)),
-            };
-        } else if let Cfg::All(b) = assume {
-            if b.contains(self) {
-                return None;
             }
+        } else if let Cfg::All(b) = assume
+            && b.contains(self)
+        {
+            None
+        } else {
+            Some(self.clone())
         }
-
-        Some(self.clone())
     }
 }
 
@@ -389,7 +389,7 @@ fn write_with_opt_paren<T: fmt::Display>(
     Ok(())
 }
 
-impl<'a> fmt::Display for Display<'a> {
+impl fmt::Display for Display<'_> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self.0 {
             Cfg::Not(ref child) => match **child {
@@ -511,12 +511,12 @@ impl<'a> fmt::Display for Display<'a> {
                         "wasi" => "WASI",
                         "watchos" => "watchOS",
                         "windows" => "Windows",
+                        "visionos" => "visionOS",
                         _ => "",
                     },
                     (sym::target_arch, Some(arch)) => match arch.as_str() {
                         "aarch64" => "AArch64",
                         "arm" => "ARM",
-                        "asmjs" => "JavaScript",
                         "loongarch64" => "LoongArch LA64",
                         "m68k" => "M68k",
                         "csky" => "CSKY",

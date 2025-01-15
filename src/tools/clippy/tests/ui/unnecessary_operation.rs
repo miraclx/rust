@@ -7,6 +7,9 @@
 )]
 #![warn(clippy::unnecessary_operation)]
 
+use std::fmt::Display;
+use std::ops::Shl;
+
 struct Tuple(i32);
 struct Struct {
     field: i32,
@@ -40,7 +43,7 @@ fn get_number() -> i32 {
     0
 }
 
-fn get_usize() -> usize {
+const fn get_usize() -> usize {
     0
 }
 fn get_struct() -> Struct {
@@ -48,6 +51,19 @@ fn get_struct() -> Struct {
 }
 fn get_drop_struct() -> DropStruct {
     DropStruct { field: 0 }
+}
+
+struct Cout;
+
+impl<T> Shl<T> for Cout
+where
+    T: Display,
+{
+    type Output = Self;
+    fn shl(self, rhs: T) -> Self::Output {
+        println!("{}", rhs);
+        self
+    }
 }
 
 fn main() {
@@ -91,4 +107,26 @@ fn main() {
         ($($e:expr),*) => {{ $($e;)* }}
     }
     use_expr!(isize::MIN / -(one() as isize), i8::MIN / -one());
+
+    // Issue #11885
+    Cout << 16;
+
+    // Issue #11575
+    // Bad formatting is required to trigger the bug
+    #[rustfmt::skip]
+    'label: {
+        break 'label
+    };
+    let () = const {
+        [42, 55][get_usize()];
+    };
+}
+
+const _: () = {
+    [42, 55][get_usize()];
+};
+
+const fn foo() {
+    [42, 55][get_usize()];
+    //~^ ERROR: unnecessary operation
 }

@@ -1,7 +1,12 @@
 //@aux-build:proc_macros.rs
 
 #![warn(clippy::ptr_cast_constness)]
-#![allow(clippy::transmute_ptr_to_ref, clippy::unnecessary_cast, unused)]
+#![allow(
+    clippy::transmute_ptr_to_ref,
+    clippy::unnecessary_cast,
+    unused,
+    clippy::missing_transmute_annotations
+)]
 
 extern crate proc_macros;
 use proc_macros::{external, inline_macros};
@@ -41,6 +46,10 @@ fn main() {
     let _ = external!($ptr as *const u32);
 }
 
+fn lifetime_to_static(v: *mut &()) -> *const &'static () {
+    v as _
+}
+
 #[clippy::msrv = "1.64"]
 fn _msrv_1_64() {
     let ptr: *const u32 = &42_u32;
@@ -58,4 +67,21 @@ fn _msrv_1_65() {
 
     let _ = ptr as *mut u32;
     let _ = mut_ptr as *const u32;
+}
+
+#[inline_macros]
+fn null_pointers() {
+    use std::ptr;
+    let _ = ptr::null::<String>() as *mut String;
+    let _ = ptr::null_mut::<u32>() as *const u32;
+    let _ = ptr::null::<u32>().cast_mut();
+    let _ = ptr::null_mut::<u32>().cast_const();
+
+    // Make sure the lint is triggered inside a macro
+    let _ = inline!(ptr::null::<u32>() as *mut u32);
+    let _ = inline!(ptr::null::<u32>().cast_mut());
+
+    // Do not lint inside macros from external crates
+    let _ = external!(ptr::null::<u32>() as *mut u32);
+    let _ = external!(ptr::null::<u32>().cast_mut());
 }

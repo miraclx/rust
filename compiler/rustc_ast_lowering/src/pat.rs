@@ -1,35 +1,45 @@
-use super::errors::{
-    ArbitraryExpressionInPattern, ExtraDoubleDot, MisplacedDoubleDot, SubTupleBinding,
-};
-use super::ResolverAstLoweringExt;
-use super::{ImplTraitContext, LoweringContext, ParamMode};
-use crate::ImplTraitPosition;
+use std::sync::Arc;
 
 use rustc_ast::ptr::P;
 use rustc_ast::*;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir as hir;
 use rustc_hir::def::Res;
-use rustc_span::symbol::Ident;
-use rustc_span::{source_map::Spanned, Span};
+use rustc_middle::span_bug;
+use rustc_span::source_map::{Spanned, respan};
+use rustc_span::{Ident, Span};
+
+use super::errors::{
+    ArbitraryExpressionInPattern, ExtraDoubleDot, MisplacedDoubleDot, SubTupleBinding,
+};
+use super::{ImplTraitContext, LoweringContext, ParamMode, ResolverAstLoweringExt};
+use crate::{AllowReturnTypeNotation, ImplTraitPosition};
 
 impl<'a, 'hir> LoweringContext<'a, 'hir> {
     pub(crate) fn lower_pat(&mut self, pattern: &Pat) -> &'hir hir::Pat<'hir> {
         self.arena.alloc(self.lower_pat_mut(pattern))
     }
 
-    pub(crate) fn lower_pat_mut(&mut self, mut pattern: &Pat) -> hir::Pat<'hir> {
+    fn lower_pat_mut(&mut self, mut pattern: &Pat) -> hir::Pat<'hir> {
         ensure_sufficient_stack(|| {
             // loop here to avoid recursion
+            let pat_hir_id = self.lower_node_id(pattern.id);
             let node = loop {
                 match &pattern.kind {
                     PatKind::Wild => break hir::PatKind::Wild,
+                    PatKind::Never => break hir::PatKind::Never,
                     PatKind::Ident(binding_mode, ident, sub) => {
                         let lower_sub = |this: &mut Self| sub.as_ref().map(|s| this.lower_pat(s));
-                        break self.lower_pat_ident(pattern, *binding_mode, *ident, lower_sub);
+                        break self.lower_pat_ident(
+                            pattern,
+                            *binding_mode,
+                            *ident,
+                            pat_hir_id,
+                            lower_sub,
+                        );
                     }
-                    PatKind::Lit(e) => {
-                        break hir::PatKind::Lit(self.lower_expr_within_pat(e, false));
+                    PatKind::Expr(e) => {
+                        break hir::PatKind::Expr(self.lower_expr_within_pat(e, false));
                     }
                     PatKind::TupleStruct(qself, path, pats) => {
                         let qpath = self.lower_qpath(
@@ -37,7 +47,8 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                             qself,
                             path,
                             ParamMode::Optional,
-                            &ImplTraitContext::Disallowed(ImplTraitPosition::Path),
+                            AllowReturnTypeNotation::No,
+                            ImplTraitContext::Disallowed(ImplTraitPosition::Path),
                             None,
                         );
                         let (pats, ddpos) = self.lower_pat_tuple(pats, "tuple struct");
@@ -54,7 +65,8 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                             qself,
                             path,
                             ParamMode::Optional,
-                            &ImplTraitContext::Disallowed(ImplTraitPosition::Path),
+                            AllowReturnTypeNotation::No,
+                            ImplTraitContext::Disallowed(ImplTraitPosition::Path),
                             None,
                         );
                         break hir::PatKind::Path(qpath);
@@ -65,7 +77,8 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                             qself,
                             path,
                             ParamMode::Optional,
-                            &ImplTraitContext::Disallowed(ImplTraitPosition::Path),
+                            AllowReturnTypeNotation::No,
+                            ImplTraitContext::Disallowed(ImplTraitPosition::Path),
                             None,
                         );
 
@@ -81,7 +94,14 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                                 span: self.lower_span(f.span),
                             }
                         }));
-                        break hir::PatKind::Struct(qpath, fs, *etc);
+                        break hir::PatKind::Struct(
+                            qpath,
+                            fs,
+                            matches!(
+                                etc,
+                                ast::PatFieldsRest::Rest | ast::PatFieldsRest::Recovered(_)
+                            ),
+                        );
                     }
                     PatKind::Tuple(pats) => {
                         let (pats, ddpos) = self.lower_pat_tuple(pats, "tuple");
@@ -89,6 +109,9 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     }
                     PatKind::Box(inner) => {
                         break hir::PatKind::Box(self.lower_pat(inner));
+                    }
+                    PatKind::Deref(inner) => {
+                        break hir::PatKind::Deref(self.lower_pat(inner));
                     }
                     PatKind::Ref(inner, mutbl) => {
                         break hir::PatKind::Ref(self.lower_pat(inner), *mutbl);
@@ -100,6 +123,9 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                             self.lower_range_end(end, e2.is_some()),
                         );
                     }
+                    PatKind::Guard(inner, cond) => {
+                        break hir::PatKind::Guard(self.lower_pat(inner), self.lower_expr(cond));
+                    }
                     PatKind::Slice(pats) => break self.lower_pat_slice(pats),
                     PatKind::Rest => {
                         // If we reach here the `..` pattern is not semantically allowed.
@@ -108,10 +134,11 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     // return inner to be processed in next loop
                     PatKind::Paren(inner) => pattern = inner,
                     PatKind::MacCall(_) => panic!("{:?} shouldn't exist here", pattern.span),
+                    PatKind::Err(guar) => break hir::PatKind::Err(*guar),
                 }
             };
 
-            self.pat_with_node_id_of(pattern, node)
+            self.pat_with_node_id_of(pattern, node, pat_hir_id)
         })
     }
 
@@ -139,7 +166,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                 // This is not allowed as a sub-tuple pattern
                 PatKind::Ident(_, ident, Some(sub)) if sub.is_rest() => {
                     let sp = pat.span;
-                    self.tcx.sess.emit_err(SubTupleBinding {
+                    self.dcx().emit_err(SubTupleBinding {
                         span: sp,
                         ident_name: ident.name,
                         ident: *ident,
@@ -179,10 +206,12 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         let mut prev_rest_span = None;
 
         // Lowers `$bm $ident @ ..` to `$bm $ident @ _`.
-        let lower_rest_sub = |this: &mut Self, pat, &ann, &ident, sub| {
-            let lower_sub = |this: &mut Self| Some(this.pat_wild_with_node_id_of(sub));
-            let node = this.lower_pat_ident(pat, ann, ident, lower_sub);
-            this.pat_with_node_id_of(pat, node)
+        let lower_rest_sub = |this: &mut Self, pat: &Pat, &ann, &ident, sub: &Pat| {
+            let sub_hir_id = this.lower_node_id(sub.id);
+            let lower_sub = |this: &mut Self| Some(this.pat_wild_with_node_id_of(sub, sub_hir_id));
+            let pat_hir_id = this.lower_node_id(pat.id);
+            let node = this.lower_pat_ident(pat, ann, ident, pat_hir_id, lower_sub);
+            this.pat_with_node_id_of(pat, node, pat_hir_id)
         };
 
         let mut iter = pats.iter();
@@ -192,7 +221,8 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                 // Found a sub-slice pattern `..`. Record, lower it to `_`, and stop here.
                 PatKind::Rest => {
                     prev_rest_span = Some(pat.span);
-                    slice = Some(self.pat_wild_with_node_id_of(pat));
+                    let hir_id = self.lower_node_id(pat.id);
+                    slice = Some(self.pat_wild_with_node_id_of(pat, hir_id));
                     break;
                 }
                 // Found a sub-slice pattern `$binding_mode $ident @ ..`.
@@ -238,21 +268,37 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     fn lower_pat_ident(
         &mut self,
         p: &Pat,
-        annotation: BindingAnnotation,
+        annotation: BindingMode,
         ident: Ident,
+        hir_id: hir::HirId,
         lower_sub: impl FnOnce(&mut Self) -> Option<&'hir hir::Pat<'hir>>,
     ) -> hir::PatKind<'hir> {
         match self.resolver.get_partial_res(p.id).map(|d| d.expect_full_res()) {
             // `None` can occur in body-less function signatures
             res @ (None | Some(Res::Local(_))) => {
-                let canonical_id = match res {
-                    Some(Res::Local(id)) => id,
-                    _ => p.id,
+                let binding_id = match res {
+                    Some(Res::Local(id)) => {
+                        // In `Or` patterns like `VariantA(s) | VariantB(s, _)`, multiple identifier patterns
+                        // will be resolved to the same `Res::Local`. Thus they just share a single
+                        // `HirId`.
+                        if id == p.id {
+                            self.ident_and_label_to_local_id.insert(id, hir_id.local_id);
+                            hir_id
+                        } else {
+                            hir::HirId {
+                                owner: self.current_hir_id_owner,
+                                local_id: self.ident_and_label_to_local_id[&id],
+                            }
+                        }
+                    }
+                    _ => {
+                        self.ident_and_label_to_local_id.insert(p.id, hir_id.local_id);
+                        hir_id
+                    }
                 };
-
                 hir::PatKind::Binding(
                     annotation,
-                    self.lower_node_id(canonical_id),
+                    binding_id,
                     self.lower_ident(ident),
                     lower_sub(self),
                 )
@@ -272,28 +318,28 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         }
     }
 
-    fn pat_wild_with_node_id_of(&mut self, p: &Pat) -> &'hir hir::Pat<'hir> {
-        self.arena.alloc(self.pat_with_node_id_of(p, hir::PatKind::Wild))
+    fn pat_wild_with_node_id_of(&mut self, p: &Pat, hir_id: hir::HirId) -> &'hir hir::Pat<'hir> {
+        self.arena.alloc(self.pat_with_node_id_of(p, hir::PatKind::Wild, hir_id))
     }
 
-    /// Construct a `Pat` with the `HirId` of `p.id` lowered.
-    fn pat_with_node_id_of(&mut self, p: &Pat, kind: hir::PatKind<'hir>) -> hir::Pat<'hir> {
-        hir::Pat {
-            hir_id: self.lower_node_id(p.id),
-            kind,
-            span: self.lower_span(p.span),
-            default_binding_modes: true,
-        }
+    /// Construct a `Pat` with the `HirId` of `p.id` already lowered.
+    fn pat_with_node_id_of(
+        &mut self,
+        p: &Pat,
+        kind: hir::PatKind<'hir>,
+        hir_id: hir::HirId,
+    ) -> hir::Pat<'hir> {
+        hir::Pat { hir_id, kind, span: self.lower_span(p.span), default_binding_modes: true }
     }
 
     /// Emit a friendly error for extra `..` patterns in a tuple/tuple struct/slice pattern.
     pub(crate) fn ban_extra_rest_pat(&self, sp: Span, prev_sp: Span, ctx: &str) {
-        self.tcx.sess.emit_err(ExtraDoubleDot { span: sp, prev_span: prev_sp, ctx });
+        self.dcx().emit_err(ExtraDoubleDot { span: sp, prev_span: prev_sp, ctx });
     }
 
     /// Used to ban the `..` pattern in places it shouldn't be semantically.
     fn ban_illegal_rest_pat(&self, sp: Span) -> hir::PatKind<'hir> {
-        self.tcx.sess.emit_err(MisplacedDoubleDot { span: sp });
+        self.dcx().emit_err(MisplacedDoubleDot { span: sp });
 
         // We're not in a list context so `..` can be reasonably treated
         // as `_` because it should always be valid and roughly matches the
@@ -324,19 +370,54 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     // }
     // m!(S);
     // ```
-    fn lower_expr_within_pat(&mut self, expr: &Expr, allow_paths: bool) -> &'hir hir::Expr<'hir> {
-        match &expr.kind {
-            ExprKind::Lit(..)
-            | ExprKind::ConstBlock(..)
-            | ExprKind::IncludedBytes(..)
-            | ExprKind::Err => {}
-            ExprKind::Path(..) if allow_paths => {}
-            ExprKind::Unary(UnOp::Neg, inner) if matches!(inner.kind, ExprKind::Lit(_)) => {}
-            _ => {
-                let guar = self.tcx.sess.emit_err(ArbitraryExpressionInPattern { span: expr.span });
-                return self.arena.alloc(self.expr_err(expr.span, guar));
+    fn lower_expr_within_pat(
+        &mut self,
+        expr: &Expr,
+        allow_paths: bool,
+    ) -> &'hir hir::PatExpr<'hir> {
+        let err = |guar| hir::PatExprKind::Lit {
+            lit: self.arena.alloc(respan(self.lower_span(expr.span), LitKind::Err(guar))),
+            negated: false,
+        };
+        let kind = match &expr.kind {
+            ExprKind::Lit(lit) => {
+                hir::PatExprKind::Lit { lit: self.lower_lit(lit, expr.span), negated: false }
             }
-        }
-        self.lower_expr(expr)
+            ExprKind::ConstBlock(c) => hir::PatExprKind::ConstBlock(self.lower_const_block(c)),
+            ExprKind::IncludedBytes(bytes) => hir::PatExprKind::Lit {
+                lit: self.arena.alloc(respan(
+                    self.lower_span(expr.span),
+                    LitKind::ByteStr(Arc::clone(bytes), StrStyle::Cooked),
+                )),
+                negated: false,
+            },
+            ExprKind::Err(guar) => err(*guar),
+            ExprKind::Dummy => span_bug!(expr.span, "lowered ExprKind::Dummy"),
+            ExprKind::Path(qself, path) if allow_paths => hir::PatExprKind::Path(self.lower_qpath(
+                expr.id,
+                qself,
+                path,
+                ParamMode::Optional,
+                AllowReturnTypeNotation::No,
+                ImplTraitContext::Disallowed(ImplTraitPosition::Path),
+                None,
+            )),
+            ExprKind::Unary(UnOp::Neg, inner) if let ExprKind::Lit(lit) = &inner.kind => {
+                hir::PatExprKind::Lit { lit: self.lower_lit(lit, expr.span), negated: true }
+            }
+            _ => {
+                let pattern_from_macro = expr.is_approximately_pattern();
+                let guar = self.dcx().emit_err(ArbitraryExpressionInPattern {
+                    span: expr.span,
+                    pattern_from_macro_note: pattern_from_macro,
+                });
+                err(guar)
+            }
+        };
+        self.arena.alloc(hir::PatExpr {
+            hir_id: self.lower_node_id(expr.id),
+            span: expr.span,
+            kind,
+        })
     }
 }

@@ -1,17 +1,15 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::higher::{get_vec_init_kind, VecInitKind};
+use clippy_utils::higher::{VecInitKind, get_vec_init_kind};
 use clippy_utils::source::snippet;
 use clippy_utils::visitors::for_each_local_use_after_expr;
 use clippy_utils::{get_parent_expr, path_to_local_id};
 use core::ops::ControlFlow;
 use rustc_errors::Applicability;
 use rustc_hir::def::Res;
-use rustc_hir::{
-    BindingAnnotation, Block, Expr, ExprKind, HirId, Local, Mutability, PatKind, QPath, Stmt, StmtKind, UnOp,
-};
+use rustc_hir::{BindingMode, Block, Expr, ExprKind, HirId, LetStmt, Mutability, PatKind, QPath, Stmt, StmtKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_session::impl_lint_pass;
 use rustc_span::{Span, Symbol};
 
 declare_clippy_lint! {
@@ -30,13 +28,15 @@ declare_clippy_lint! {
     /// multiple `push` calls.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let mut v = Vec::new();
     /// v.push(0);
+    /// v.push(1);
+    /// v.push(2);
     /// ```
     /// Use instead:
-    /// ```rust
-    /// let v = vec![0];
+    /// ```no_run
+    /// let v = vec![0, 1, 2];
     /// ```
     #[clippy::version = "1.51.0"]
     pub VEC_INIT_THEN_PUSH,
@@ -98,7 +98,7 @@ impl VecPushSearcher {
                     needs_mut |= cx.typeck_results().expr_ty_adjusted(last_place).ref_mutability()
                         == Some(Mutability::Mut)
                         || get_parent_expr(cx, last_place)
-                            .map_or(false, |e| matches!(e.kind, ExprKind::AddrOf(_, Mutability::Mut, _)));
+                            .is_some_and(|e| matches!(e.kind, ExprKind::AddrOf(_, Mutability::Mut, _)));
                 },
                 ExprKind::MethodCall(_, recv, ..)
                     if recv.hir_id == e.hir_id
@@ -155,9 +155,9 @@ impl<'tcx> LateLintPass<'tcx> for VecInitThenPush {
         self.searcher = None;
     }
 
-    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx Local<'tcx>) {
+    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx LetStmt<'tcx>) {
         if let Some(init_expr) = local.init
-            && let PatKind::Binding(BindingAnnotation::MUT, id, name, None) = local.pat.kind
+            && let PatKind::Binding(BindingMode::MUT, id, name, None) = local.pat.kind
             && !in_external_macro(cx.sess(), local.span)
             && let Some(init) = get_vec_init_kind(cx, init_expr)
             && !matches!(init, VecInitKind::WithExprCapacity(_))
@@ -166,8 +166,8 @@ impl<'tcx> LateLintPass<'tcx> for VecInitThenPush {
                 local_id: id,
                 init,
                 lhs_is_let: true,
-                name: name.name,
                 let_ty_span: local.ty.map(|ty| ty.span),
+                name: name.name,
                 err_span: local.span,
                 found: 0,
                 last_push_expr: init_expr.hir_id,
@@ -206,10 +206,10 @@ impl<'tcx> LateLintPass<'tcx> for VecInitThenPush {
                 && name.ident.as_str() == "push"
             {
                 self.searcher = Some(VecPushSearcher {
-                    found: searcher.found + 1,
                     err_span: searcher.err_span.to(stmt.span),
+                    found: searcher.found + 1,
                     last_push_expr: expr.hir_id,
-                    .. searcher
+                    ..searcher
                 });
             } else {
                 searcher.display_err(cx);

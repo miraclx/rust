@@ -1,4 +1,3 @@
-#![feature(lint_reasons)]
 #![warn(clippy::same_name_method)]
 #![allow(dead_code, non_camel_case_types)]
 
@@ -74,6 +73,7 @@ mod should_lint {
         impl S {
             fn foo() {}
             //~^ ERROR: method's name is the same as an existing method in a trait
+            //~| ERROR: method's name is the same as an existing method in a trait
         }
 
         impl T1 for S {}

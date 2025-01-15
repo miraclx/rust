@@ -7,7 +7,8 @@
     clippy::equatable_if_let,
     clippy::needless_if,
     clippy::needless_return,
-    clippy::self_named_constructors
+    clippy::self_named_constructors,
+    clippy::struct_field_names
 )]
 
 use std::cell::Cell;
@@ -189,4 +190,16 @@ fn needless_bool_condition() -> bool {
     }
 
     foo()
+}
+
+fn issue12846() {
+    let a = true;
+    let b = false;
+
+    // parentheses are needed here
+    let _x = if a && b { true } else { false }.then(|| todo!());
+    let _x = if a && b { true } else { false } as u8;
+
+    // parentheses are not needed here
+    let _x = if a { true } else { false }.then(|| todo!());
 }

@@ -1,8 +1,8 @@
+use std::hash::{DefaultHasher, Hasher};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::cli::TestOpts;
 use crate::types::{TestDescAndFn, TestId, TestName};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn get_shuffle_seed(opts: &TestOpts) -> Option<u64> {
     opts.shuffle_seed.or_else(|| {

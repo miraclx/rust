@@ -1,19 +1,23 @@
-use clippy_utils::diagnostics::span_lint_and_help;
-use clippy_utils::macros::{find_assert_args, find_assert_eq_args, root_macro_call_first_node, PanicExpn};
-use clippy_utils::{is_in_cfg_test, is_in_test_function};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::is_in_test;
+use clippy_utils::macros::{PanicExpn, find_assert_args, find_assert_eq_args, root_macro_call_first_node};
 use rustc_hir::Expr;
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::sym;
 
 declare_clippy_lint! {
     /// ### What it does
     /// Checks assertions without a custom panic message.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Without a good custom message, it'd be hard to understand what went wrong when the assertion fails.
     /// A good custom message should be more about why the failure of the assertion is problematic
     /// and not what is failed because the assertion already conveys that.
+    ///
+    /// Although the same reasoning applies to testing functions, this lint ignores them as they would be too noisy.
+    /// Also, in most cases understanding the test failure would be easier
+    /// compared to understanding a complex invariant distributed around the codebase.
     ///
     /// ### Known problems
     /// This lint cannot check the quality of the custom panic messages.
@@ -23,14 +27,14 @@ declare_clippy_lint! {
     /// don't provide any extra information.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # struct Service { ready: bool }
     /// fn call(service: Service) {
     ///     assert!(service.ready);
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # struct Service { ready: bool }
     /// fn call(service: Service) {
     ///     assert!(service.ready, "`service.poll_ready()` must be called first to ensure that service is ready to receive requests");
@@ -58,7 +62,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingAssertMessage {
         };
 
         // This lint would be very noisy in tests, so just ignore if we're in test context
-        if is_in_test_function(cx.tcx, expr.hir_id) || is_in_cfg_test(cx.tcx, expr.hir_id) {
+        if is_in_test(cx.tcx, expr.hir_id) {
             return;
         }
 
@@ -75,13 +79,15 @@ impl<'tcx> LateLintPass<'tcx> for MissingAssertMessage {
         };
 
         if let PanicExpn::Empty = panic_expn {
-            span_lint_and_help(
+            #[expect(clippy::collapsible_span_lint_calls, reason = "rust-clippy#7797")]
+            span_lint_and_then(
                 cx,
                 MISSING_ASSERT_MESSAGE,
                 macro_call.span,
                 "assert without any message",
-                None,
-                "consider describing why the failing assert is problematic",
+                |diag| {
+                    diag.help("consider describing why the failing assert is problematic");
+                },
             );
         }
     }

@@ -3,7 +3,7 @@
 //! depend on the ide_ssr crate.
 
 use ide_assists::{Assist, AssistId, AssistKind, AssistResolveStrategy, GroupLabel};
-use ide_db::{base_db::FileRange, label::Label, source_change::SourceChange, RootDatabase};
+use ide_db::{label::Label, source_change::SourceChange, FileRange, RootDatabase};
 
 pub(crate) fn ssr_assists(
     db: &RootDatabase,
@@ -26,7 +26,7 @@ pub(crate) fn ssr_assists(
             SourceChange::from_text_edit(frange.file_id, text_edit_for_file)
         };
 
-        let source_change_for_workspace = SourceChange::from(match_finder.edits());
+        let source_change_for_workspace = SourceChange::from_iter(match_finder.edits());
 
         (Some(source_change_for_file), Some(source_change_for_workspace))
     } else {
@@ -41,11 +41,11 @@ pub(crate) fn ssr_assists(
     for (label, source_change) in assists.into_iter() {
         let assist = Assist {
             id,
-            label: Label::new(label.to_string()),
+            label: Label::new(label.to_owned()),
             group: Some(GroupLabel("Apply SSR".into())),
             target: comment_range,
             source_change,
-            trigger_signature_help: false,
+            command: None,
         };
 
         ssr_assists.push(assist);
@@ -59,10 +59,10 @@ mod tests {
     use expect_test::expect;
     use ide_assists::{Assist, AssistResolveStrategy};
     use ide_db::{
-        base_db::{fixture::WithFixture, salsa::Durability, FileRange},
-        symbol_index::SymbolsDatabase,
-        FxHashSet, RootDatabase,
+        base_db::ra_salsa::Durability, symbol_index::SymbolsDatabase, FileRange, FxHashSet,
+        RootDatabase,
     };
+    use test_fixture::WithFixture;
     use triomphe::Arc;
 
     use super::ssr_assists;
@@ -70,9 +70,13 @@ mod tests {
     fn get_assists(ra_fixture: &str, resolve: AssistResolveStrategy) -> Vec<Assist> {
         let (mut db, file_id, range_or_offset) = RootDatabase::with_range_or_offset(ra_fixture);
         let mut local_roots = FxHashSet::default();
-        local_roots.insert(ide_db::base_db::fixture::WORKSPACE);
+        local_roots.insert(test_fixture::WORKSPACE);
         db.set_local_roots_with_durability(Arc::new(local_roots), Durability::HIGH);
-        ssr_assists(&db, &resolve, FileRange { file_id, range: range_or_offset.into() })
+        ssr_assists(
+            &db,
+            &resolve,
+            FileRange { file_id: file_id.into(), range: range_or_offset.into() },
+        )
     }
 
     #[test]
@@ -142,7 +146,7 @@ mod tests {
                         is_snippet: false,
                     },
                 ),
-                trigger_signature_help: false,
+                command: None,
             }
         "#]]
         .assert_debug_eq(&apply_in_file_assist);
@@ -195,7 +199,7 @@ mod tests {
                         is_snippet: false,
                     },
                 ),
-                trigger_signature_help: false,
+                command: None,
             }
         "#]]
         .assert_debug_eq(&apply_in_workspace_assist);
@@ -235,7 +239,7 @@ mod tests {
                 ),
                 target: 10..21,
                 source_change: None,
-                trigger_signature_help: false,
+                command: None,
             }
         "#]]
         .assert_debug_eq(&apply_in_file_assist);
@@ -255,7 +259,7 @@ mod tests {
                 ),
                 target: 10..21,
                 source_change: None,
-                trigger_signature_help: false,
+                command: None,
             }
         "#]]
         .assert_debug_eq(&apply_in_workspace_assist);

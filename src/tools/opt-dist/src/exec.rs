@@ -1,11 +1,13 @@
-use crate::environment::Environment;
-use crate::metrics::{load_metrics, record_metrics};
-use crate::timer::TimerSection;
-use crate::training::{LlvmBoltProfile, LlvmPGOProfile, RustcPGOProfile};
-use camino::{Utf8Path, Utf8PathBuf};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::process::{Command, Stdio};
+
+use camino::{Utf8Path, Utf8PathBuf};
+
+use crate::environment::Environment;
+use crate::metrics::{load_metrics, record_metrics};
+use crate::timer::TimerSection;
+use crate::training::{BoltProfile, LlvmPGOProfile, RustcPGOProfile};
 
 #[derive(Default)]
 pub struct CmdBuilder {
@@ -96,16 +98,16 @@ pub struct Bootstrap {
 }
 
 impl Bootstrap {
-    pub fn build(env: &dyn Environment) -> Self {
+    pub fn build(env: &Environment) -> Self {
         let metrics_path = env.build_root().join("build").join("metrics.json");
         let cmd = cmd(&[
             env.python_binary(),
             env.checkout_path().join("x.py").as_str(),
             "build",
             "--target",
-            &env.host_triple(),
+            &env.host_tuple(),
             "--host",
-            &env.host_triple(),
+            &env.host_tuple(),
             "--stage",
             "2",
             "library/std",
@@ -114,7 +116,7 @@ impl Bootstrap {
         Self { cmd, metrics_path }
     }
 
-    pub fn dist(env: &dyn Environment, dist_args: &[String]) -> Self {
+    pub fn dist(env: &Environment, dist_args: &[String]) -> Self {
         let metrics_path = env.build_root().join("build").join("metrics.json");
         let cmd = cmd(&dist_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>())
             .env("RUST_BACKTRACE", "full");
@@ -159,7 +161,12 @@ impl Bootstrap {
         self
     }
 
-    pub fn with_bolt_profile(mut self, profile: LlvmBoltProfile) -> Self {
+    pub fn with_rustc_bolt_ldflags(mut self) -> Self {
+        self.cmd = self.cmd.arg("--enable-bolt-settings");
+        self
+    }
+
+    pub fn with_bolt_profile(mut self, profile: BoltProfile) -> Self {
         self.cmd = self.cmd.arg("--reproducible-artifact").arg(profile.0.as_str());
         self
     }

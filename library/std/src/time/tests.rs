@@ -1,7 +1,9 @@
-use super::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use core::fmt::Debug;
+
 #[cfg(not(target_arch = "wasm32"))]
-use test::{black_box, Bencher};
+use test::{Bencher, black_box};
+
+use super::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 macro_rules! assert_almost_eq {
     ($a:expr, $b:expr) => {{
@@ -233,8 +235,8 @@ macro_rules! bench_instant_threaded {
         #[bench]
         #[cfg(not(target_arch = "wasm32"))]
         fn $bench_name(b: &mut Bencher) -> crate::thread::Result<()> {
-            use crate::sync::atomic::{AtomicBool, Ordering};
             use crate::sync::Arc;
+            use crate::sync::atomic::{AtomicBool, Ordering};
 
             let running = Arc::new(AtomicBool::new(true));
 

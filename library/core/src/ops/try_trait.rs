@@ -226,14 +226,8 @@ pub trait Try: FromResidual {
     on(
         all(
             from_desugaring = "QuestionMark",
-            any(
-                _Self = "core::result::Result<T, E>",
-                _Self = "std::result::Result<T, E>",
-            ),
-            any(
-                R = "core::option::Option<core::convert::Infallible>",
-                R = "std::option::Option<std::convert::Infallible>",
-            )
+            _Self = "core::result::Result<T, E>",
+            R = "core::option::Option<core::convert::Infallible>",
         ),
         message = "the `?` operator can only be used on `Result`s, not `Option`s, \
             in {ItemContext} that returns `Result`",
@@ -243,10 +237,7 @@ pub trait Try: FromResidual {
     on(
         all(
             from_desugaring = "QuestionMark",
-            any(
-                _Self = "core::result::Result<T, E>",
-                _Self = "std::result::Result<T, E>",
-            )
+            _Self = "core::result::Result<T, E>",
         ),
         // There's a special error message in the trait selection code for
         // `From` in `?`, so this is not shown for result-in-result errors,
@@ -259,14 +250,8 @@ pub trait Try: FromResidual {
     on(
         all(
             from_desugaring = "QuestionMark",
-            any(
-                _Self = "core::option::Option<T>",
-                _Self = "std::option::Option<T>",
-            ),
-            any(
-                R = "core::result::Result<T, E>",
-                R = "std::result::Result<T, E>",
-            )
+            _Self = "core::option::Option<T>",
+            R = "core::result::Result<T, E>",
         ),
         message = "the `?` operator can only be used on `Option`s, not `Result`s, \
             in {ItemContext} that returns `Option`",
@@ -276,10 +261,7 @@ pub trait Try: FromResidual {
     on(
         all(
             from_desugaring = "QuestionMark",
-            any(
-                _Self = "core::option::Option<T>",
-                _Self = "std::option::Option<T>",
-            )
+            _Self = "core::option::Option<T>",
         ),
         // `Option`-in-`Option` always works, as there's only one possible
         // residual, so this can also be phrased strongly.
@@ -291,14 +273,8 @@ pub trait Try: FromResidual {
     on(
         all(
             from_desugaring = "QuestionMark",
-            any(
-                _Self = "core::ops::ControlFlow<B, C>",
-                _Self = "std::ops::ControlFlow<B, C>",
-            ),
-            any(
-                R = "core::ops::ControlFlow<B, C>",
-                R = "std::ops::ControlFlow<B, C>",
-            )
+            _Self = "core::ops::control_flow::ControlFlow<B, C>",
+            R = "core::ops::control_flow::ControlFlow<B, C>",
         ),
         message = "the `?` operator in {ItemContext} that returns `ControlFlow<B, _>` \
             can only be used on other `ControlFlow<B, _>`s (with the same Break type)",
@@ -309,10 +285,7 @@ pub trait Try: FromResidual {
     on(
         all(
             from_desugaring = "QuestionMark",
-            any(
-                _Self = "core::ops::ControlFlow<B, C>",
-                _Self = "std::ops::ControlFlow<B, C>",
-            )
+            _Self = "core::ops::control_flow::ControlFlow<B, C>",
             // `R` is not a `ControlFlow`, as that case was matched previously
         ),
         message = "the `?` operator can only be used on `ControlFlow`s \
@@ -337,7 +310,7 @@ pub trait FromResidual<R = <Self as Try>::Residual> {
     /// This should be implemented consistently with the `branch` method such
     /// that applying the `?` operator will get back an equivalent residual:
     /// `FromResidual::from_residual(r).branch() --> ControlFlow::Break(r)`.
-    /// (It must not be an *identical* residual when interconversion is involved.)
+    /// (The residual is not mandated to be *identical* when interconversion is involved.)
     ///
     /// # Examples
     ///
@@ -390,7 +363,9 @@ pub trait Residual<O> {
 }
 
 #[unstable(feature = "pub_crate_should_not_need_unstable_attr", issue = "none")]
-pub(crate) type ChangeOutputType<T, V> = <<T as Try>::Residual as Residual<V>>::TryType;
+#[allow(type_alias_bounds)]
+pub(crate) type ChangeOutputType<T: Try<Residual: Residual<V>>, V> =
+    <T::Residual as Residual<V>>::TryType;
 
 /// An adapter for implementing non-try methods via the `Try` implementation.
 ///

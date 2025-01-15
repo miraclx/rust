@@ -165,7 +165,8 @@ fn test_join_for_different_lengths_with_long_separator() {
 
 #[test]
 fn test_join_issue_80335() {
-    use core::{borrow::Borrow, cell::Cell};
+    use core::borrow::Borrow;
+    use core::cell::Cell;
 
     struct WeirdBorrow {
         state: Cell<bool>,
@@ -1171,6 +1172,17 @@ fn test_iterator() {
 }
 
 #[test]
+fn test_iterator_advance() {
+    let s = "「赤錆」と呼ばれる鉄錆は、水の存在下での鉄の自然酸化によって生じる、オキシ水酸化鉄(III) 等の（含水）酸化物粒子の疎な凝集膜であるとみなせる。";
+    let chars: Vec<char> = s.chars().collect();
+    let mut it = s.chars();
+    it.advance_by(1).unwrap();
+    assert_eq!(it.next(), Some(chars[1]));
+    it.advance_by(33).unwrap();
+    assert_eq!(it.next(), Some(chars[35]));
+}
+
+#[test]
 fn test_rev_iterator() {
     let s = "ศไทย中华Việt Nam";
     let v = ['m', 'a', 'N', ' ', 't', 'ệ', 'i', 'V', '华', '中', 'ย', 'ท', 'ไ', 'ศ'];
@@ -1512,14 +1524,18 @@ fn test_lines() {
     t("bare\r", &["bare\r"]);
     t("bare\rcr", &["bare\rcr"]);
     t("Text\n\r", &["Text", "\r"]);
-    t(
-        "\nMäry häd ä little lämb\n\r\nLittle lämb\n",
-        &["", "Märy häd ä little lämb", "", "Little lämb"],
-    );
-    t(
-        "\r\nMäry häd ä little lämb\n\nLittle lämb",
-        &["", "Märy häd ä little lämb", "", "Little lämb"],
-    );
+    t("\nMäry häd ä little lämb\n\r\nLittle lämb\n", &[
+        "",
+        "Märy häd ä little lämb",
+        "",
+        "Little lämb",
+    ]);
+    t("\r\nMäry häd ä little lämb\n\nLittle lämb", &[
+        "",
+        "Märy häd ä little lämb",
+        "",
+        "Little lämb",
+    ]);
 }
 
 #[test]
@@ -1837,6 +1853,12 @@ fn to_lowercase() {
     assert_eq!("ΑΣ'Α".to_lowercase(), "ασ'α");
     assert_eq!("ΑΣ''Α".to_lowercase(), "ασ''α");
 
+    // https://github.com/rust-lang/rust/issues/124714
+    // input lengths around the boundary of the chunk size used by the ascii prefix optimization
+    assert_eq!("abcdefghijklmnoΣ".to_lowercase(), "abcdefghijklmnoς");
+    assert_eq!("abcdefghijklmnopΣ".to_lowercase(), "abcdefghijklmnopς");
+    assert_eq!("abcdefghijklmnopqΣ".to_lowercase(), "abcdefghijklmnopqς");
+
     // a really long string that has it's lowercase form
     // even longer. this tests that implementations don't assume
     // an incorrect upper bound on allocations
@@ -1913,12 +1935,10 @@ mod pattern {
         }
     }
 
-    fn cmp_search_to_vec<'a>(
-        rev: bool,
-        pat: impl Pattern<'a, Searcher: ReverseSearcher<'a>>,
-        haystack: &'a str,
-        right: Vec<SearchStep>,
-    ) {
+    fn cmp_search_to_vec<P>(rev: bool, pat: P, haystack: &str, right: Vec<SearchStep>)
+    where
+        P: for<'a> Pattern<Searcher<'a>: ReverseSearcher<'a>>,
+    {
         let mut searcher = pat.into_searcher(haystack);
         let mut v = vec![];
         loop {
@@ -1958,88 +1978,73 @@ mod pattern {
         assert_eq!(v, right);
     }
 
-    make_test!(
-        str_searcher_ascii_haystack,
-        "bb",
-        "abbcbbd",
-        [Reject(0, 1), Match(1, 3), Reject(3, 4), Match(4, 6), Reject(6, 7),]
-    );
-    make_test!(
-        str_searcher_ascii_haystack_seq,
-        "bb",
-        "abbcbbbbd",
-        [Reject(0, 1), Match(1, 3), Reject(3, 4), Match(4, 6), Match(6, 8), Reject(8, 9),]
-    );
-    make_test!(
-        str_searcher_empty_needle_ascii_haystack,
-        "",
-        "abbcbbd",
-        [
-            Match(0, 0),
-            Reject(0, 1),
-            Match(1, 1),
-            Reject(1, 2),
-            Match(2, 2),
-            Reject(2, 3),
-            Match(3, 3),
-            Reject(3, 4),
-            Match(4, 4),
-            Reject(4, 5),
-            Match(5, 5),
-            Reject(5, 6),
-            Match(6, 6),
-            Reject(6, 7),
-            Match(7, 7),
-        ]
-    );
-    make_test!(
-        str_searcher_multibyte_haystack,
-        " ",
-        "├──",
-        [Reject(0, 3), Reject(3, 6), Reject(6, 9),]
-    );
-    make_test!(
-        str_searcher_empty_needle_multibyte_haystack,
-        "",
-        "├──",
-        [
-            Match(0, 0),
-            Reject(0, 3),
-            Match(3, 3),
-            Reject(3, 6),
-            Match(6, 6),
-            Reject(6, 9),
-            Match(9, 9),
-        ]
-    );
+    make_test!(str_searcher_ascii_haystack, "bb", "abbcbbd", [
+        Reject(0, 1),
+        Match(1, 3),
+        Reject(3, 4),
+        Match(4, 6),
+        Reject(6, 7),
+    ]);
+    make_test!(str_searcher_ascii_haystack_seq, "bb", "abbcbbbbd", [
+        Reject(0, 1),
+        Match(1, 3),
+        Reject(3, 4),
+        Match(4, 6),
+        Match(6, 8),
+        Reject(8, 9),
+    ]);
+    make_test!(str_searcher_empty_needle_ascii_haystack, "", "abbcbbd", [
+        Match(0, 0),
+        Reject(0, 1),
+        Match(1, 1),
+        Reject(1, 2),
+        Match(2, 2),
+        Reject(2, 3),
+        Match(3, 3),
+        Reject(3, 4),
+        Match(4, 4),
+        Reject(4, 5),
+        Match(5, 5),
+        Reject(5, 6),
+        Match(6, 6),
+        Reject(6, 7),
+        Match(7, 7),
+    ]);
+    make_test!(str_searcher_multibyte_haystack, " ", "├──", [
+        Reject(0, 3),
+        Reject(3, 6),
+        Reject(6, 9),
+    ]);
+    make_test!(str_searcher_empty_needle_multibyte_haystack, "", "├──", [
+        Match(0, 0),
+        Reject(0, 3),
+        Match(3, 3),
+        Reject(3, 6),
+        Match(6, 6),
+        Reject(6, 9),
+        Match(9, 9),
+    ]);
     make_test!(str_searcher_empty_needle_empty_haystack, "", "", [Match(0, 0),]);
     make_test!(str_searcher_nonempty_needle_empty_haystack, "├", "", []);
-    make_test!(
-        char_searcher_ascii_haystack,
-        'b',
-        "abbcbbd",
-        [
-            Reject(0, 1),
-            Match(1, 2),
-            Match(2, 3),
-            Reject(3, 4),
-            Match(4, 5),
-            Match(5, 6),
-            Reject(6, 7),
-        ]
-    );
-    make_test!(
-        char_searcher_multibyte_haystack,
-        ' ',
-        "├──",
-        [Reject(0, 3), Reject(3, 6), Reject(6, 9),]
-    );
-    make_test!(
-        char_searcher_short_haystack,
-        '\u{1F4A9}',
-        "* \t",
-        [Reject(0, 1), Reject(1, 2), Reject(2, 3),]
-    );
+    make_test!(char_searcher_ascii_haystack, 'b', "abbcbbd", [
+        Reject(0, 1),
+        Match(1, 2),
+        Match(2, 3),
+        Reject(3, 4),
+        Match(4, 5),
+        Match(5, 6),
+        Reject(6, 7),
+    ]);
+    make_test!(char_searcher_multibyte_haystack, ' ', "├──", [
+        Reject(0, 3),
+        Reject(3, 6),
+        Reject(6, 9),
+    ]);
+    make_test!(char_searcher_short_haystack, '\u{1F4A9}', "* \t", [
+        Reject(0, 1),
+        Reject(1, 2),
+        Reject(2, 3),
+    ]);
 
     // See #85462
     #[test]
@@ -2177,9 +2182,9 @@ generate_iterator_test! {
 fn different_str_pattern_forwarding_lifetimes() {
     use std::str::pattern::Pattern;
 
-    fn foo<'a, P>(p: P)
+    fn foo<P>(p: P)
     where
-        for<'b> &'b P: Pattern<'a>,
+        for<'b> &'b P: Pattern,
     {
         for _ in 0..3 {
             "asdf".find(&p);

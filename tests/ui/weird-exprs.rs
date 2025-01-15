@@ -1,6 +1,6 @@
-// run-pass
+//@ run-pass
 
-#![feature(generators)]
+#![feature(coroutines)]
 
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
@@ -152,6 +152,7 @@ fn r#match() {
 }
 
 fn i_yield() {
+    #[coroutine]
     static || {
         yield yield yield yield yield yield yield yield yield;
     };
@@ -231,6 +232,45 @@ fn infcx() {
     let _cx: cx::cx::Cx = cx::cx::cx::cx::cx::Cx;
 }
 
+fn return_already() -> impl std::fmt::Debug {
+    loop {
+        return !!!!!!!
+        break !!!!!!1111
+    }
+}
+
+fn fake_macros() -> impl std::fmt::Debug {
+    loop {
+        if! {
+            match! (
+                break! {
+                    return! {
+                        1337
+                    }
+                }
+            )
+
+            {}
+        }
+
+        {}
+    }
+}
+
+fn fish_fight() {
+    trait Rope {
+        fn _____________<U>(_: Self, _: U) where Self: Sized {}
+    }
+
+    struct T;
+
+    impl Rope for T {}
+
+    fn tug_o_war(_: impl Fn(T, T)) {}
+
+    tug_o_war(<T>::_____________::<T>);
+}
+
 pub fn main() {
     strange();
     funny();
@@ -257,4 +297,7 @@ pub fn main() {
     semisemisemisemisemi();
     useful_syntax();
     infcx();
+    return_already();
+    fake_macros();
+    fish_fight();
 }

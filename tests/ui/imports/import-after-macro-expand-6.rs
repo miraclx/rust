@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 // https://github.com/rust-lang/rust/pull/113099#issuecomment-1633574396
 
 pub mod a {
@@ -18,7 +18,5 @@ mod b {
 use crate::a::HeaderMap;
 
 fn main() {
-    let h: crate::b::http::HeaderMap = HeaderMap;
-    // FIXME: should refer to `crate::b::HeaderMap`,
-    // FIXME: but doesn't currently refer to it due to backward compatibility
+    let h: crate::b::HeaderMap = HeaderMap;
 }

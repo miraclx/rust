@@ -1,9 +1,12 @@
-use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::SeqCst;
 
 #[cfg(not(panic = "abort"))]
 mod drop_checks {
     //! These tests mainly make sure the elements are correctly dropped.
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     #[derive(Debug)]
     struct DropInfo {
@@ -156,10 +159,11 @@ fn output_n2() {
         <Vec<[char; 2]>>::new(),
     );
     assert_eq!("ab".chars().map_windows(|a: &[_; 2]| *a).collect::<Vec<_>>(), vec![['a', 'b']]);
-    assert_eq!(
-        "abcd".chars().map_windows(|a: &[_; 2]| *a).collect::<Vec<_>>(),
-        vec![['a', 'b'], ['b', 'c'], ['c', 'd']],
-    );
+    assert_eq!("abcd".chars().map_windows(|a: &[_; 2]| *a).collect::<Vec<_>>(), vec![
+        ['a', 'b'],
+        ['b', 'c'],
+        ['c', 'd']
+    ],);
 }
 
 #[test]

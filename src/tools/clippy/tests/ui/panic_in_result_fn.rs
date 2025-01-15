@@ -56,6 +56,11 @@ fn function_result_with_panic() -> Result<bool, String> // should emit lint
     panic!("error");
 }
 
+fn in_closure() -> Result<bool, String> {
+    let c = || panic!();
+    c()
+}
+
 fn todo() {
     println!("something");
 }
@@ -64,6 +69,15 @@ fn function_result_with_custom_todo() -> Result<bool, String> // should not emit
 {
     todo();
     Ok(true)
+}
+
+fn issue_13381<const N: usize>() -> Result<(), String> {
+    const {
+        if N == 0 {
+            panic!();
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<(), String> {

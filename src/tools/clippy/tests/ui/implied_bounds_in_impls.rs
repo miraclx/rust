@@ -1,6 +1,6 @@
 #![warn(clippy::implied_bounds_in_impls)]
 #![allow(dead_code)]
-#![feature(return_position_impl_trait_in_trait)]
+#![feature(impl_trait_in_assoc_type, type_alias_impl_trait)]
 
 use std::ops::{Deref, DerefMut};
 
@@ -63,6 +63,114 @@ impl SomeTrait for SomeStruct {
     fn f() -> impl Deref + DerefMut<Target = u8> {
         Box::new(42)
     }
+}
+
+mod issue11422 {
+    use core::fmt::Debug;
+    // Some additional tests that would cause ICEs:
+
+    // `PartialOrd` has a default generic parameter and does not need to be explicitly specified.
+    // This needs special handling.
+    fn default_generic_param1() -> impl PartialEq + PartialOrd + Debug {}
+    fn default_generic_param2() -> impl PartialOrd + PartialEq + Debug {}
+
+    // Referring to `Self` in the supertrait clause needs special handling.
+    trait Trait1<X: ?Sized> {}
+    trait Trait2: Trait1<Self> {}
+    impl Trait1<()> for () {}
+    impl Trait2 for () {}
+
+    fn f() -> impl Trait1<()> + Trait2 {}
+}
+
+mod issue11435 {
+    // Associated type needs to be included on DoubleEndedIterator in the suggestion
+    fn my_iter() -> impl Iterator<Item = u32> + DoubleEndedIterator {
+        0..5
+    }
+
+    // Removing the `Clone` bound should include the `+` behind it in its remove suggestion
+    fn f() -> impl Copy + Clone {
+        1
+    }
+
+    trait Trait1<T> {
+        type U;
+    }
+    impl Trait1<i32> for () {
+        type U = i64;
+    }
+    trait Trait2<T>: Trait1<T> {}
+    impl Trait2<i32> for () {}
+
+    // When the other trait has generics, it shouldn't add another pair of `<>`
+    fn f2() -> impl Trait1<i32, U = i64> + Trait2<i32> {}
+
+    trait Trait3<T, U, V> {
+        type X;
+        type Y;
+    }
+    trait Trait4<T>: Trait3<T, i16, i64> {}
+    impl Trait3<i8, i16, i64> for () {
+        type X = i32;
+        type Y = i128;
+    }
+    impl Trait4<i8> for () {}
+
+    // Associated type `X` is specified, but `Y` is not, so only that associated type should be moved
+    // over
+    fn f3() -> impl Trait3<i8, i16, i64, X = i32, Y = i128> + Trait4<i8, X = i32> {}
+}
+
+fn issue11880() {
+    trait X {
+        type T;
+        type U;
+    }
+    trait Y: X {
+        type T;
+        type V;
+    }
+    impl X for () {
+        type T = i32;
+        type U = String;
+    }
+    impl Y for () {
+        type T = u32;
+        type V = Vec<u8>;
+    }
+
+    // Can't constrain `X::T` through `Y`
+    fn f() -> impl X<T = i32> + Y {}
+    fn f2() -> impl X<T = i32> + Y<T = u32> {}
+
+    // X::T is never constrained in the first place, so it can be omitted
+    // and left unconstrained
+    fn f3() -> impl X + Y {}
+    fn f4() -> impl X + Y<T = u32> {}
+    fn f5() -> impl X<U = String> + Y<T = u32> {}
+}
+
+fn apit(_: impl Deref + DerefMut) {}
+
+trait Rpitit {
+    fn f() -> impl Deref + DerefMut;
+}
+
+trait Atpit {
+    type Assoc;
+    fn define() -> Self::Assoc;
+}
+impl Atpit for () {
+    type Assoc = impl Deref + DerefMut;
+    fn define() -> Self::Assoc {
+        &mut [] as &mut [()]
+    }
+}
+
+type Tait = impl Deref + DerefMut;
+fn define() -> Tait {
+    &mut [] as &mut [()]
 }
 
 fn main() {}

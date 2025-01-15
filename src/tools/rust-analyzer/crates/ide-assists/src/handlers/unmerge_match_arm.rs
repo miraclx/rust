@@ -34,6 +34,9 @@ use crate::{AssistContext, AssistId, AssistKind, Assists};
 pub(crate) fn unmerge_match_arm(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     let pipe_token = ctx.find_token_syntax_at_offset(T![|])?;
     let or_pat = ast::OrPat::cast(pipe_token.parent()?)?.clone_for_update();
+    if or_pat.leading_pipe().is_some_and(|it| it == pipe_token) {
+        return None;
+    }
     let match_arm = ast::MatchArm::cast(or_pat.syntax().parent()?)?;
     let match_arm_body = match_arm.expr()?;
 
@@ -62,7 +65,7 @@ pub(crate) fn unmerge_match_arm(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
             let mut pipe_index = pipe_token.index();
             if pipe_token
                 .prev_sibling_or_token()
-                .map_or(false, |it| it.kind() == SyntaxKind::WHITESPACE)
+                .is_some_and(|it| it.kind() == SyntaxKind::WHITESPACE)
             {
                 pipe_index -= 1;
             }

@@ -1,5 +1,5 @@
 error: called `map(..).flatten()` on `Option`
-  --> $DIR/map_flatten.rs:8:10
+  --> tests/ui/map_flatten.rs:8:10
    |
 LL |           .map(|x| {
    |  __________^
@@ -12,6 +12,7 @@ LL | |         .flatten();
    | |__________________^
    |
    = note: `-D clippy::map-flatten` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::map_flatten)]`
 help: try replacing `map` with `and_then` and remove the `.flatten()`
    |
 LL ~         .and_then(|x| {
@@ -26,7 +27,7 @@ LL ~         });
    |
 
 error: called `map(..).flatten()` on `Result`
-  --> $DIR/map_flatten.rs:20:10
+  --> tests/ui/map_flatten.rs:20:10
    |
 LL |           .map(|x| {
    |  __________^
@@ -51,7 +52,7 @@ LL ~         });
    |
 
 error: called `map(..).flatten()` on `Result`
-  --> $DIR/map_flatten.rs:33:10
+  --> tests/ui/map_flatten.rs:33:10
    |
 LL |           .map(|res| {
    |  __________^
@@ -77,7 +78,7 @@ LL ~         });
    |
 
 error: called `map(..).flatten()` on `Iterator`
-  --> $DIR/map_flatten.rs:46:10
+  --> tests/ui/map_flatten.rs:46:10
    |
 LL |           .map(|some_value| {
    |  __________^
@@ -101,5 +102,14 @@ LL +             }
 LL +         })
    |
 
-error: aborting due to 4 previous errors
+error: called `map(..).flatten()` on `Iterator`
+  --> tests/ui/map_flatten.rs:64:10
+   |
+LL |           .map(|x| x.iter())
+   |  __________^
+...  |
+LL | |         .flatten();
+   | |__________________^ help: try replacing `map` with `flat_map` and remove the `.flatten()`: `flat_map(|x| x.iter())`
+
+error: aborting due to 5 previous errors
 

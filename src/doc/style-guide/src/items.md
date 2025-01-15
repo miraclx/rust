@@ -9,8 +9,8 @@ an item appears at module level or within another item.
 alphabetically.
 
 `use` statements, and module *declarations* (`mod foo;`, not `mod { ... }`)
-must come before other items. Put imports before module declarations. Sort each
-alphabetically, except that `self` and `super` must come before any other
+must come before other items. Put imports before module declarations.
+Version-sort each, except that `self` and `super` must come before any other
 names.
 
 Don't automatically move module declarations annotated with `#[macro_use]`,
@@ -367,26 +367,52 @@ where
 ## Type aliases
 
 Keep type aliases on one line when they fit. If necessary to break the line, do
-so after the `=`, and block-indent the right-hand side:
+so before the `=`, and block-indent the right-hand side:
 
 ```rust
 pub type Foo = Bar<T>;
 
 // If multi-line is required
-type VeryLongType<T, U: SomeBound> =
-    AnEvenLongerType<T, U, Foo<T>>;
+type VeryLongType<T, U: SomeBound>
+    = AnEvenLongerType<T, U, Foo<T>>;
 ```
 
-Where possible avoid `where` clauses and keep type constraints inline. Where
-that is not possible split the line before and after the `where` clause (and
-split the `where` clause as normal), e.g.,
+When there is a trailing `where` clause after the type, and no `where` clause
+present before the type, break before the `=` and indent. Then break before the
+`where` keyword and format the clauses normally, e.g.,
 
 ```rust
+// With only a trailing where clause
 type VeryLongType<T, U>
+    = AnEvenLongerType<T, U, Foo<T>>
+where
+    T: U::AnAssociatedType,
+    U: SomeBound;
+```
+
+When there is a `where` clause before the type, format it normally, and break
+after the last clause. Do not indent before the `=` to leave it visually
+distinct from the indented clauses that precede it. If there is additionally a
+`where` clause after the type, break before the `where` keyword and format the
+clauses normally.
+
+```rust
+// With only a preceding where clause.
+type WithPrecedingWC<T, U>
 where
     T: U::AnAssociatedType,
     U: SomeBound,
 = AnEvenLongerType<T, U, Foo<T>>;
+
+// Or with both a preceding and trailing where clause.
+type WithPrecedingWC<T, U>
+where
+    T: U::AnAssociatedType,
+    U: SomeBound,
+= AnEvenLongerType<T, U, Foo<T>>
+where
+    T: U::AnAssociatedType2,
+    U: SomeBound2;
 ```
 
 ## Associated types
@@ -401,8 +427,8 @@ pub type Foo: Bar;
 ## extern items
 
 When writing extern items (such as `extern "C" fn`), always specify the ABI.
-For example, write `extern "C" fn foo ...`, not `extern fn foo ...`, or
-`extern "C" { ... }`.
+For example, write `extern "C" fn foo ...` or `unsafe extern "C" { ...}`
+and avoid `extern fn foo ...` and `unsafe extern { ... }`.
 
 ## Imports (`use` statements)
 
@@ -441,8 +467,8 @@ foo::{
 A *group* of imports is a set of imports on the same or sequential lines. One or
 more blank lines or other items (e.g., a function) separate groups of imports.
 
-Within a group of imports, imports must be sorted ASCIIbetically (uppercase
-before lowercase). Groups of imports must not be merged or re-ordered.
+Within a group of imports, imports must be version-sorted. Groups of imports
+must not be merged or re-ordered.
 
 E.g., input:
 
@@ -469,10 +495,13 @@ re-ordering.
 
 ### Ordering list import
 
-Names in a list import must be sorted ASCIIbetically, but with `self` and
-`super` first, and groups and glob imports last. This applies recursively. For
-example, `a::*` comes before `b::a` but `a::b` comes before `a::*`. E.g.,
-`use foo::bar::{a, b::c, b::d, b::d::{x, y, z}, b::{self, r, s}};`.
+Names in a list import must be version-sorted, except that:
+- `self` and `super` always come first if present, and
+- groups and glob imports always come last if present.
+
+This applies recursively. For example, `a::*` comes before `b::a` but `a::b`
+comes before `a::*`. E.g., `use foo::bar::{a, b::c, b::d, b::d::{x, y, z},
+b::{self, r, s}};`.
 
 ### Normalisation
 

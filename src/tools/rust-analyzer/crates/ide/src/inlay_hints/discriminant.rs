@@ -5,7 +5,9 @@
 //! }
 //! ```
 use hir::Semantics;
-use ide_db::{base_db::FileId, famous_defs::FamousDefs, RootDatabase};
+use ide_db::text_edit::TextEdit;
+use ide_db::{famous_defs::FamousDefs, RootDatabase};
+use span::EditionedFileId;
 use syntax::ast::{self, AstNode, HasName};
 
 use crate::{
@@ -17,7 +19,7 @@ pub(super) fn enum_hints(
     acc: &mut Vec<InlayHint>,
     FamousDefs(sema, _): &FamousDefs<'_, '_>,
     config: &InlayHintsConfig,
-    _: FileId,
+    _: EditionedFileId,
     enum_: ast::Enum,
 ) -> Option<()> {
     if let DiscriminantHints::Never = config.discriminant_hints {
@@ -30,11 +32,11 @@ pub(super) fn enum_hints(
         return None;
     }
     // data carrying enums without a primitive repr have no stable discriminants
-    if data_carrying && def.repr(sema.db).map_or(true, |r| r.int.is_none()) {
+    if data_carrying && def.repr(sema.db).is_none_or(|r| r.int.is_none()) {
         return None;
     }
     for variant in enum_.variant_list()?.variants() {
-        variant_hints(acc, sema, &variant);
+        variant_hints(acc, sema, &enum_, &variant);
     }
     Some(())
 }
@@ -42,6 +44,7 @@ pub(super) fn enum_hints(
 fn variant_hints(
     acc: &mut Vec<InlayHint>,
     sema: &Semantics<'_, RootDatabase>,
+    enum_: &ast::Enum,
     variant: &ast::Variant,
 ) -> Option<()> {
     if variant.expr().is_some() {
@@ -63,18 +66,18 @@ fn variant_hints(
     let eq_ = if eq_token.is_none() { " =" } else { "" };
     let label = InlayHintLabel::simple(
         match d {
-            Ok(x) => {
-                if x >= 10 {
-                    format!("{eq_} {x} ({x:#X})")
+            Ok(val) => {
+                if val >= 10 {
+                    format!("{eq_} {val} ({val:#X})")
                 } else {
-                    format!("{eq_} {x}")
+                    format!("{eq_} {val}")
                 }
             }
             Err(_) => format!("{eq_} ?"),
         },
         Some(InlayTooltip::String(match &d {
             Ok(_) => "enum variant discriminant".into(),
-            Err(e) => format!("{e:?}").into(),
+            Err(e) => format!("{e:?}"),
         })),
         None,
     );
@@ -85,10 +88,11 @@ fn variant_hints(
         },
         kind: InlayKind::Discriminant,
         label,
-        text_edit: None,
+        text_edit: d.ok().map(|val| TextEdit::insert(range.start(), format!("{eq_} {val}"))),
         position: InlayHintPosition::After,
         pad_left: false,
         pad_right: false,
+        resolve_parent: Some(enum_.syntax().text_range()),
     });
 
     Some(())

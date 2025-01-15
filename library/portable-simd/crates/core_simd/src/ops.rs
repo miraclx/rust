@@ -1,4 +1,4 @@
-use crate::simd::{LaneCount, Simd, SimdElement, SimdPartialEq, SupportedLaneCount};
+use crate::simd::{cmp::SimdPartialEq, LaneCount, Simd, SimdElement, SupportedLaneCount};
 use core::ops::{Add, Mul};
 use core::ops::{BitAnd, BitOr, BitXor};
 use core::ops::{Div, Rem, Sub};
@@ -6,12 +6,13 @@ use core::ops::{Shl, Shr};
 
 mod assign;
 mod deref;
+mod shift_scalar;
 mod unary;
 
-impl<I, T, const LANES: usize> core::ops::Index<I> for Simd<T, LANES>
+impl<I, T, const N: usize> core::ops::Index<I> for Simd<T, N>
 where
     T: SimdElement,
-    LaneCount<LANES>: SupportedLaneCount,
+    LaneCount<N>: SupportedLaneCount,
     I: core::slice::SliceIndex<[T]>,
 {
     type Output = I::Output;
@@ -21,10 +22,10 @@ where
     }
 }
 
-impl<I, T, const LANES: usize> core::ops::IndexMut<I> for Simd<T, LANES>
+impl<I, T, const N: usize> core::ops::IndexMut<I> for Simd<T, N>
 where
     T: SimdElement,
-    LaneCount<LANES>: SupportedLaneCount,
+    LaneCount<N>: SupportedLaneCount,
     I: core::slice::SliceIndex<[T]>,
 {
     #[inline]
@@ -36,7 +37,7 @@ where
 macro_rules! unsafe_base {
     ($lhs:ident, $rhs:ident, {$simd_call:ident}, $($_:tt)*) => {
         // Safety: $lhs and $rhs are vectors
-        unsafe { $crate::simd::intrinsics::$simd_call($lhs, $rhs) }
+        unsafe { core::intrinsics::simd::$simd_call($lhs, $rhs) }
     };
 }
 
@@ -54,7 +55,7 @@ macro_rules! wrap_bitshift {
         #[allow(clippy::suspicious_arithmetic_impl)]
         // Safety: $lhs and the bitand result are vectors
         unsafe {
-            $crate::simd::intrinsics::$simd_call(
+            core::intrinsics::simd::$simd_call(
                 $lhs,
                 $rhs.bitand(Simd::splat(<$int>::BITS as $int - 1)),
             )
@@ -96,7 +97,7 @@ macro_rules! int_divrem_guard {
                 $rhs
             };
             // Safety: $lhs and rhs are vectors
-            unsafe { $crate::simd::intrinsics::$simd_call($lhs, rhs) }
+            unsafe { core::intrinsics::simd::$simd_call($lhs, rhs) }
         }
     };
 }
@@ -121,7 +122,7 @@ macro_rules! for_base_types {
                     #[inline]
                     #[must_use = "operator returns a new vector without mutating the inputs"]
                     // TODO: only useful for int Div::div, but we hope that this
-                    // will essentially always always get inlined anyway.
+                    // will essentially always get inlined anyway.
                     #[track_caller]
                     fn $call(self, rhs: Self) -> Self::Output {
                         $macro_impl!(self, rhs, $inner, $scalar)

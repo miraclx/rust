@@ -9,13 +9,13 @@ const DEFAULT_COLUMN_WIDTH: usize = 140;
 
 thread_local! {
     /// Track the position of viewable characters in our buffer
-    static CURSOR: Cell<usize> = Cell::new(0);
+    static CURSOR: Cell<usize> = const { Cell::new(0) };
     /// Width of the terminal
-    static WIDTH: Cell<usize> = Cell::new(DEFAULT_COLUMN_WIDTH);
+    static WIDTH: Cell<usize> = const { Cell::new(DEFAULT_COLUMN_WIDTH) };
 }
 
 /// Print to terminal output to a buffer
-pub fn entrypoint(stream: &MdStream<'_>, buf: &mut Buffer) -> io::Result<()> {
+pub(crate) fn entrypoint(stream: &MdStream<'_>, buf: &mut Buffer) -> io::Result<()> {
     #[cfg(not(test))]
     if let Some((w, _)) = termize::dimensions() {
         WIDTH.with(|c| c.set(std::cmp::min(w, DEFAULT_COLUMN_WIDTH)));
@@ -47,7 +47,7 @@ fn write_stream(
     Ok(())
 }
 
-pub fn write_tt(tt: &MdTree<'_>, buf: &mut Buffer, indent: usize) -> io::Result<()> {
+fn write_tt(tt: &MdTree<'_>, buf: &mut Buffer, indent: usize) -> io::Result<()> {
     match tt {
         MdTree::CodeBlock { txt, lang: _ } => {
             buf.set_color(ColorSpec::new().set_dimmed(true))?;

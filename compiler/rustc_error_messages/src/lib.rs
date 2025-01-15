@@ -1,52 +1,33 @@
-#![feature(let_chains)]
-#![feature(lazy_cell)]
-#![feature(rustc_attrs)]
-#![feature(type_alias_impl_trait)]
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
+// tidy-alphabetical-start
 #![allow(internal_features)]
+#![doc(rust_logo)]
+#![feature(rustc_attrs)]
+#![feature(rustdoc_internals)]
+#![feature(type_alias_impl_trait)]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
-#[macro_use]
-extern crate tracing;
-
-use fluent_bundle::FluentResource;
-use fluent_syntax::parser::ParserError;
-use icu_provider_adapters::fallback::{LocaleFallbackProvider, LocaleFallbacker};
-use rustc_data_structures::sync::{IntoDynSyncSend, Lrc};
-use rustc_fluent_macro::fluent_messages;
-use rustc_macros::{Decodable, Encodable};
-use rustc_span::Span;
 use std::borrow::Cow;
 use std::error::Error;
-use std::fmt;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use std::{fmt, fs, io};
 
-#[cfg(not(parallel_compiler))]
-use std::cell::LazyCell as Lazy;
-#[cfg(parallel_compiler)]
-use std::sync::LazyLock as Lazy;
-
-#[cfg(parallel_compiler)]
+use fluent_bundle::FluentResource;
+pub use fluent_bundle::types::FluentType;
+pub use fluent_bundle::{self, FluentArgs, FluentError, FluentValue};
+use fluent_syntax::parser::ParserError;
+use icu_provider_adapters::fallback::{LocaleFallbackProvider, LocaleFallbacker};
 use intl_memoizer::concurrent::IntlLangMemoizer;
-#[cfg(not(parallel_compiler))]
-use intl_memoizer::IntlLangMemoizer;
-
-pub use fluent_bundle::{self, types::FluentType, FluentArgs, FluentError, FluentValue};
-pub use unic_langid::{langid, LanguageIdentifier};
-
-fluent_messages! { "../messages.ftl" }
+use rustc_data_structures::sync::{IntoDynSyncSend, Lrc};
+use rustc_macros::{Decodable, Encodable};
+use rustc_span::Span;
+use tracing::{instrument, trace};
+pub use unic_langid::{LanguageIdentifier, langid};
 
 pub type FluentBundle =
     IntoDynSyncSend<fluent_bundle::bundle::FluentBundle<FluentResource, IntlLangMemoizer>>;
 
-#[cfg(not(parallel_compiler))]
-fn new_bundle(locales: Vec<LanguageIdentifier>) -> FluentBundle {
-    IntoDynSyncSend(fluent_bundle::bundle::FluentBundle::new(locales))
-}
-
-#[cfg(parallel_compiler)]
 fn new_bundle(locales: Vec<LanguageIdentifier>) -> FluentBundle {
     IntoDynSyncSend(fluent_bundle::bundle::FluentBundle::new_concurrent(locales))
 }
@@ -224,7 +205,7 @@ fn register_functions(bundle: &mut FluentBundle) {
 
 /// Type alias for the result of `fallback_fluent_bundle` - a reference-counted pointer to a lazily
 /// evaluated fluent bundle.
-pub type LazyFallbackBundle = Lrc<Lazy<FluentBundle, impl FnOnce() -> FluentBundle>>;
+pub type LazyFallbackBundle = Lrc<LazyLock<FluentBundle, impl FnOnce() -> FluentBundle>>;
 
 /// Return the default `FluentBundle` with standard "en-US" diagnostic messages.
 #[instrument(level = "trace", skip(resources))]
@@ -232,7 +213,7 @@ pub fn fallback_fluent_bundle(
     resources: Vec<&'static str>,
     with_directionality_markers: bool,
 ) -> LazyFallbackBundle {
-    Lrc::new(Lazy::new(move || {
+    Lrc::new(LazyLock::new(move || {
         let mut fallback_bundle = new_bundle(vec![langid!("en-US")]);
 
         register_functions(&mut fallback_bundle);
@@ -257,24 +238,20 @@ type FluentId = Cow<'static, str>;
 /// translatable and non-translatable diagnostic messages.
 ///
 /// Translatable messages for subdiagnostics are typically attributes attached to a larger Fluent
-/// message so messages of this type must be combined with a `DiagnosticMessage` (using
-/// `DiagnosticMessage::with_subdiagnostic_message`) before rendering. However, subdiagnostics from
+/// message so messages of this type must be combined with a `DiagMessage` (using
+/// `DiagMessage::with_subdiagnostic_message`) before rendering. However, subdiagnostics from
 /// the `Subdiagnostic` derive refer to Fluent identifiers directly.
-#[rustc_diagnostic_item = "SubdiagnosticMessage"]
-pub enum SubdiagnosticMessage {
+#[rustc_diagnostic_item = "SubdiagMessage"]
+pub enum SubdiagMessage {
     /// Non-translatable diagnostic message.
     Str(Cow<'static, str>),
     /// Translatable message which has already been translated eagerly.
     ///
     /// Some diagnostics have repeated subdiagnostics where the same interpolated variables would
-    /// be instantiated multiple times with different values. As translation normally happens
-    /// immediately prior to emission, after the diagnostic and subdiagnostic derive logic has run,
-    /// the setting of diagnostic arguments in the derived code will overwrite previous variable
-    /// values and only the final value will be set when translation occurs - resulting in
-    /// incorrect diagnostics. Eager translation results in translation for a subdiagnostic
-    /// happening immediately after the subdiagnostic derive's logic has been run. This variant
-    /// stores messages which have been translated eagerly.
-    Eager(Cow<'static, str>),
+    /// be instantiated multiple times with different values. These subdiagnostics' messages
+    /// are translated when they are added to the parent diagnostic, producing this variant of
+    /// `DiagMessage`.
+    Translated(Cow<'static, str>),
     /// Identifier of a Fluent message. Instances of this variant are generated by the
     /// `Subdiagnostic` derive.
     FluentIdentifier(FluentId),
@@ -286,19 +263,19 @@ pub enum SubdiagnosticMessage {
     FluentAttr(FluentId),
 }
 
-impl From<String> for SubdiagnosticMessage {
+impl From<String> for SubdiagMessage {
     fn from(s: String) -> Self {
-        SubdiagnosticMessage::Str(Cow::Owned(s))
+        SubdiagMessage::Str(Cow::Owned(s))
     }
 }
-impl From<&'static str> for SubdiagnosticMessage {
+impl From<&'static str> for SubdiagMessage {
     fn from(s: &'static str) -> Self {
-        SubdiagnosticMessage::Str(Cow::Borrowed(s))
+        SubdiagMessage::Str(Cow::Borrowed(s))
     }
 }
-impl From<Cow<'static, str>> for SubdiagnosticMessage {
+impl From<Cow<'static, str>> for SubdiagMessage {
     fn from(s: Cow<'static, str>) -> Self {
-        SubdiagnosticMessage::Str(s)
+        SubdiagMessage::Str(s)
     }
 }
 
@@ -307,108 +284,88 @@ impl From<Cow<'static, str>> for SubdiagnosticMessage {
 ///
 /// Intended to be removed once diagnostics are entirely translatable.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Encodable, Decodable)]
-#[rustc_diagnostic_item = "DiagnosticMessage"]
-pub enum DiagnosticMessage {
+#[rustc_diagnostic_item = "DiagMessage"]
+pub enum DiagMessage {
     /// Non-translatable diagnostic message.
     Str(Cow<'static, str>),
-    /// Translatable message which has already been translated eagerly.
+    /// Translatable message which has been already translated.
     ///
     /// Some diagnostics have repeated subdiagnostics where the same interpolated variables would
-    /// be instantiated multiple times with different values. As translation normally happens
-    /// immediately prior to emission, after the diagnostic and subdiagnostic derive logic has run,
-    /// the setting of diagnostic arguments in the derived code will overwrite previous variable
-    /// values and only the final value will be set when translation occurs - resulting in
-    /// incorrect diagnostics. Eager translation results in translation for a subdiagnostic
-    /// happening immediately after the subdiagnostic derive's logic has been run. This variant
-    /// stores messages which have been translated eagerly.
-    Eager(Cow<'static, str>),
+    /// be instantiated multiple times with different values. These subdiagnostics' messages
+    /// are translated when they are added to the parent diagnostic, producing this variant of
+    /// `DiagMessage`.
+    Translated(Cow<'static, str>),
     /// Identifier for a Fluent message (with optional attribute) corresponding to the diagnostic
-    /// message.
+    /// message. Yet to be translated.
     ///
     /// <https://projectfluent.org/fluent/guide/hello.html>
     /// <https://projectfluent.org/fluent/guide/attributes.html>
     FluentIdentifier(FluentId, Option<FluentId>),
 }
 
-impl DiagnosticMessage {
-    /// Given a `SubdiagnosticMessage` which may contain a Fluent attribute, create a new
-    /// `DiagnosticMessage` that combines that attribute with the Fluent identifier of `self`.
+impl DiagMessage {
+    /// Given a `SubdiagMessage` which may contain a Fluent attribute, create a new
+    /// `DiagMessage` that combines that attribute with the Fluent identifier of `self`.
     ///
-    /// - If the `SubdiagnosticMessage` is non-translatable then return the message as a
-    /// `DiagnosticMessage`.
+    /// - If the `SubdiagMessage` is non-translatable then return the message as a `DiagMessage`.
     /// - If `self` is non-translatable then return `self`'s message.
-    pub fn with_subdiagnostic_message(&self, sub: SubdiagnosticMessage) -> Self {
+    pub fn with_subdiagnostic_message(&self, sub: SubdiagMessage) -> Self {
         let attr = match sub {
-            SubdiagnosticMessage::Str(s) => return DiagnosticMessage::Str(s),
-            SubdiagnosticMessage::Eager(s) => return DiagnosticMessage::Eager(s),
-            SubdiagnosticMessage::FluentIdentifier(id) => {
-                return DiagnosticMessage::FluentIdentifier(id, None);
+            SubdiagMessage::Str(s) => return DiagMessage::Str(s),
+            SubdiagMessage::Translated(s) => return DiagMessage::Translated(s),
+            SubdiagMessage::FluentIdentifier(id) => {
+                return DiagMessage::FluentIdentifier(id, None);
             }
-            SubdiagnosticMessage::FluentAttr(attr) => attr,
+            SubdiagMessage::FluentAttr(attr) => attr,
         };
 
         match self {
-            DiagnosticMessage::Str(s) => DiagnosticMessage::Str(s.clone()),
-            DiagnosticMessage::Eager(s) => DiagnosticMessage::Eager(s.clone()),
-            DiagnosticMessage::FluentIdentifier(id, _) => {
-                DiagnosticMessage::FluentIdentifier(id.clone(), Some(attr))
+            DiagMessage::Str(s) => DiagMessage::Str(s.clone()),
+            DiagMessage::Translated(s) => DiagMessage::Translated(s.clone()),
+            DiagMessage::FluentIdentifier(id, _) => {
+                DiagMessage::FluentIdentifier(id.clone(), Some(attr))
             }
         }
     }
 
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            DiagnosticMessage::Eager(s) | DiagnosticMessage::Str(s) => Some(s),
-            DiagnosticMessage::FluentIdentifier(_, _) => None,
+            DiagMessage::Translated(s) | DiagMessage::Str(s) => Some(s),
+            DiagMessage::FluentIdentifier(_, _) => None,
         }
     }
 }
 
-impl From<String> for DiagnosticMessage {
+impl From<String> for DiagMessage {
     fn from(s: String) -> Self {
-        DiagnosticMessage::Str(Cow::Owned(s))
+        DiagMessage::Str(Cow::Owned(s))
     }
 }
-impl From<&'static str> for DiagnosticMessage {
+impl From<&'static str> for DiagMessage {
     fn from(s: &'static str) -> Self {
-        DiagnosticMessage::Str(Cow::Borrowed(s))
+        DiagMessage::Str(Cow::Borrowed(s))
     }
 }
-impl From<Cow<'static, str>> for DiagnosticMessage {
+impl From<Cow<'static, str>> for DiagMessage {
     fn from(s: Cow<'static, str>) -> Self {
-        DiagnosticMessage::Str(s)
-    }
-}
-
-/// A workaround for "good path" ICEs when formatting types in disabled lints.
-///
-/// Delays formatting until `.into(): DiagnosticMessage` is used.
-pub struct DelayDm<F>(pub F);
-
-impl<F: FnOnce() -> String> From<DelayDm<F>> for DiagnosticMessage {
-    fn from(DelayDm(f): DelayDm<F>) -> Self {
-        DiagnosticMessage::from(f())
+        DiagMessage::Str(s)
     }
 }
 
 /// Translating *into* a subdiagnostic message from a diagnostic message is a little strange - but
-/// the subdiagnostic functions (e.g. `span_label`) take a `SubdiagnosticMessage` and the
-/// subdiagnostic derive refers to typed identifiers that are `DiagnosticMessage`s, so need to be
-/// able to convert between these, as much as they'll be converted back into `DiagnosticMessage`
+/// the subdiagnostic functions (e.g. `span_label`) take a `SubdiagMessage` and the
+/// subdiagnostic derive refers to typed identifiers that are `DiagMessage`s, so need to be
+/// able to convert between these, as much as they'll be converted back into `DiagMessage`
 /// using `with_subdiagnostic_message` eventually. Don't use this other than for the derive.
-impl Into<SubdiagnosticMessage> for DiagnosticMessage {
-    fn into(self) -> SubdiagnosticMessage {
-        match self {
-            DiagnosticMessage::Str(s) => SubdiagnosticMessage::Str(s),
-            DiagnosticMessage::Eager(s) => SubdiagnosticMessage::Eager(s),
-            DiagnosticMessage::FluentIdentifier(id, None) => {
-                SubdiagnosticMessage::FluentIdentifier(id)
-            }
+impl From<DiagMessage> for SubdiagMessage {
+    fn from(val: DiagMessage) -> Self {
+        match val {
+            DiagMessage::Str(s) => SubdiagMessage::Str(s),
+            DiagMessage::Translated(s) => SubdiagMessage::Translated(s),
+            DiagMessage::FluentIdentifier(id, None) => SubdiagMessage::FluentIdentifier(id),
             // There isn't really a sensible behaviour for this because it loses information but
             // this is the most sensible of the behaviours.
-            DiagnosticMessage::FluentIdentifier(_, Some(attr)) => {
-                SubdiagnosticMessage::FluentAttr(attr)
-            }
+            DiagMessage::FluentIdentifier(_, Some(attr)) => SubdiagMessage::FluentAttr(attr),
         }
     }
 }
@@ -424,7 +381,7 @@ pub struct SpanLabel {
     pub is_primary: bool,
 
     /// What label should we attach to this span (if any)?
-    pub label: Option<DiagnosticMessage>,
+    pub label: Option<DiagMessage>,
 }
 
 /// A collection of `Span`s.
@@ -438,7 +395,7 @@ pub struct SpanLabel {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Encodable, Decodable)]
 pub struct MultiSpan {
     primary_spans: Vec<Span>,
-    span_labels: Vec<(Span, DiagnosticMessage)>,
+    span_labels: Vec<(Span, DiagMessage)>,
 }
 
 impl MultiSpan {
@@ -456,7 +413,7 @@ impl MultiSpan {
         MultiSpan { primary_spans: vec, span_labels: vec![] }
     }
 
-    pub fn push_span_label(&mut self, span: Span, label: impl Into<DiagnosticMessage>) {
+    pub fn push_span_label(&mut self, span: Span, label: impl Into<DiagMessage>) {
         self.span_labels.push((span, label.into()));
     }
 
@@ -499,7 +456,7 @@ impl MultiSpan {
         replacements_occurred
     }
 
-    pub fn pop_span_label(&mut self) -> Option<(Span, DiagnosticMessage)> {
+    pub fn pop_span_label(&mut self) -> Option<(Span, DiagMessage)> {
         self.span_labels.pop()
     }
 
@@ -579,15 +536,6 @@ pub fn fluent_value_from_str_list_sep_by_and(l: Vec<Cow<'_, str>>) -> FluentValu
             Cow::Owned(result)
         }
 
-        #[cfg(not(parallel_compiler))]
-        fn as_string_threadsafe(
-            &self,
-            _intls: &intl_memoizer::concurrent::IntlLangMemoizer,
-        ) -> Cow<'static, str> {
-            unreachable!("`as_string_threadsafe` is not used in non-parallel rustc")
-        }
-
-        #[cfg(parallel_compiler)]
         fn as_string_threadsafe(
             &self,
             intls: &intl_memoizer::concurrent::IntlLangMemoizer,

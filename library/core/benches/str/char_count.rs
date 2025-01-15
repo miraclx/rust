@@ -1,5 +1,6 @@
+use test::{Bencher, black_box};
+
 use super::corpora::*;
-use test::{black_box, Bencher};
 
 macro_rules! define_benches {
     ($( fn $name: ident($arg: ident: &str) $body: block )+) => {

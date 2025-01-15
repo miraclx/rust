@@ -1,35 +1,37 @@
 //! This module provides `StaticIndex` which is used for powering
 //! read-only code browsers and emitting LSIF
 
-use std::collections::HashMap;
-
-use hir::{db::HirDatabase, Crate, Module};
-use ide_db::helpers::get_definition;
+use hir::{db::HirDatabase, Crate, HirFileIdExt, Module, Semantics};
 use ide_db::{
-    base_db::{FileId, FileRange, SourceDatabaseExt},
+    base_db::{SourceRootDatabase, VfsPath},
     defs::Definition,
-    FxHashSet, RootDatabase,
+    documentation::Documentation,
+    famous_defs::FamousDefs,
+    helpers::get_definition,
+    FileId, FileRange, FxHashMap, FxHashSet, RootDatabase,
 };
-use syntax::{AstNode, SyntaxKind::*, TextRange, T};
+use span::Edition;
+use syntax::{AstNode, SyntaxKind::*, SyntaxNode, TextRange, T};
 
+use crate::navigation_target::UpmappingResult;
 use crate::{
-    hover::hover_for_definition,
-    inlay_hints::AdjustmentHintsMode,
-    moniker::{def_to_moniker, MonikerResult},
+    hover::{hover_for_definition, SubstTyLen},
+    inlay_hints::{AdjustmentHintsMode, InlayFieldsToResolve},
+    moniker::{def_to_kind, def_to_moniker, MonikerResult, SymbolInformationKind},
     parent_module::crates_for,
     Analysis, Fold, HoverConfig, HoverResult, InlayHint, InlayHintsConfig, TryToNav,
 };
 
 /// A static representation of fully analyzed source code.
 ///
-/// The intended use-case is powering read-only code browsers and emitting LSIF
+/// The intended use-case is powering read-only code browsers and emitting LSIF/SCIP.
 #[derive(Debug)]
 pub struct StaticIndex<'a> {
     pub files: Vec<StaticIndexedFile>,
     pub tokens: TokenStore,
     analysis: &'a Analysis,
     db: &'a RootDatabase,
-    def_map: HashMap<Definition, TokenId>,
+    def_map: FxHashMap<Definition, TokenId>,
 }
 
 #[derive(Debug)]
@@ -40,10 +42,14 @@ pub struct ReferenceData {
 
 #[derive(Debug)]
 pub struct TokenStaticData {
+    pub documentation: Option<Documentation>,
     pub hover: Option<HoverResult>,
     pub definition: Option<FileRange>,
     pub references: Vec<ReferenceData>,
     pub moniker: Option<MonikerResult>,
+    pub display_name: Option<String>,
+    pub signature: Option<String>,
+    pub kind: SymbolInformationKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -99,6 +105,28 @@ fn all_modules(db: &dyn HirDatabase) -> Vec<Module> {
     modules
 }
 
+fn documentation_for_definition(
+    sema: &Semantics<'_, RootDatabase>,
+    def: Definition,
+    scope_node: &SyntaxNode,
+) -> Option<Documentation> {
+    let famous_defs = match &def {
+        Definition::BuiltinType(_) => Some(FamousDefs(sema, sema.scope(scope_node)?.krate())),
+        _ => None,
+    };
+
+    def.docs(
+        sema.db,
+        famous_defs.as_ref(),
+        def.krate(sema.db).map(|it| it.edition(sema.db)).unwrap_or(Edition::CURRENT),
+    )
+}
+
+pub enum VendoredLibrariesConfig<'a> {
+    Included { workspace_root: &'a VfsPath },
+    Excluded,
+}
+
 impl StaticIndex<'_> {
     fn add_file(&mut self, file_id: FileId) {
         let current_crate = crates_for(self.db, file_id).pop().map(Into::into);
@@ -111,12 +139,18 @@ impl StaticIndex<'_> {
                     discriminant_hints: crate::DiscriminantHints::Fieldless,
                     type_hints: true,
                     parameter_hints: true,
+                    generic_parameter_hints: crate::GenericParameterHints {
+                        type_hints: false,
+                        lifetime_hints: false,
+                        const_hints: true,
+                    },
                     chaining_hints: true,
                     closure_return_type_hints: crate::ClosureReturnTypeHints::WithBlock,
                     lifetime_elision_hints: crate::LifetimeElisionHints::Never,
                     adjustment_hints: crate::AdjustmentHints::Never,
                     adjustment_hints_mode: AdjustmentHintsMode::Prefix,
                     adjustment_hints_hide_outside_unsafe: false,
+                    implicit_drop_hints: false,
                     hide_named_constructor_hints: false,
                     hide_closure_initialization_hints: false,
                     closure_style: hir::ClosureStyle::ImplFn,
@@ -125,6 +159,8 @@ impl StaticIndex<'_> {
                     max_length: Some(25),
                     closure_capture_hints: false,
                     closing_brace_hints_min_lines: Some(25),
+                    fields_to_resolve: InlayFieldsToResolve::empty(),
+                    range_exclusive_hints: false,
                 },
                 file_id,
                 None,
@@ -132,7 +168,9 @@ impl StaticIndex<'_> {
             .unwrap();
         // hovers
         let sema = hir::Semantics::new(self.db);
-        let tokens_or_nodes = sema.parse(file_id).syntax().clone();
+        let tokens_or_nodes = sema.parse_guess_edition(file_id).syntax().clone();
+        let edition =
+            sema.attach_first_edition(file_id).map(|it| it.edition()).unwrap_or(Edition::CURRENT);
         let tokens = tokens_or_nodes.descendants_with_tokens().filter_map(|it| match it {
             syntax::NodeOrToken::Node(_) => None,
             syntax::NodeOrToken::Token(it) => Some(it),
@@ -143,6 +181,10 @@ impl StaticIndex<'_> {
             documentation: true,
             keywords: true,
             format: crate::HoverDocFormat::Markdown,
+            max_trait_assoc_items_count: None,
+            max_fields_count: Some(5),
+            max_enum_variants_count: Some(5),
+            max_subst_ty_len: SubstTyLen::Unlimited,
         };
         let tokens = tokens.filter(|token| {
             matches!(
@@ -162,13 +204,28 @@ impl StaticIndex<'_> {
                 *it
             } else {
                 let it = self.tokens.insert(TokenStaticData {
-                    hover: hover_for_definition(&sema, file_id, def, &node, &hover_config),
-                    definition: def.try_to_nav(self.db).map(|it| FileRange {
-                        file_id: it.file_id,
-                        range: it.focus_or_full_range(),
+                    documentation: documentation_for_definition(&sema, def, &node),
+                    hover: Some(hover_for_definition(
+                        &sema,
+                        file_id,
+                        def,
+                        None,
+                        &node,
+                        None,
+                        false,
+                        &hover_config,
+                        edition,
+                    )),
+                    definition: def.try_to_nav(self.db).map(UpmappingResult::call_site).map(|it| {
+                        FileRange { file_id: it.file_id, range: it.focus_or_full_range() }
                     }),
                     references: vec![],
                     moniker: current_crate.and_then(|cc| def_to_moniker(self.db, def, cc)),
+                    display_name: def
+                        .name(self.db)
+                        .map(|name| name.display(self.db, edition).to_string()),
+                    signature: Some(def.label(self.db, edition)),
+                    kind: def_to_kind(self.db, def),
                 });
                 self.def_map.insert(def, it);
                 it
@@ -176,7 +233,7 @@ impl StaticIndex<'_> {
             let token = self.tokens.get_mut(id).unwrap();
             token.references.push(ReferenceData {
                 range: FileRange { range, file_id },
-                is_definition: match def.try_to_nav(self.db) {
+                is_definition: match def.try_to_nav(self.db).map(UpmappingResult::call_site) {
                     Some(it) => it.file_id == file_id && it.focus_or_full_range() == range,
                     None => false,
                 },
@@ -186,13 +243,23 @@ impl StaticIndex<'_> {
         self.files.push(result);
     }
 
-    pub fn compute(analysis: &Analysis) -> StaticIndex<'_> {
+    pub fn compute<'a>(
+        analysis: &'a Analysis,
+        vendored_libs_config: VendoredLibrariesConfig<'_>,
+    ) -> StaticIndex<'a> {
         let db = &*analysis.db;
         let work = all_modules(db).into_iter().filter(|module| {
             let file_id = module.definition_source_file_id(db).original_file(db);
-            let source_root = db.file_source_root(file_id);
+            let source_root = db.file_source_root(file_id.into());
             let source_root = db.source_root(source_root);
-            !source_root.is_library
+            let is_vendored = match vendored_libs_config {
+                VendoredLibrariesConfig::Included { workspace_root } => source_root
+                    .path_for_file(&file_id.into())
+                    .is_some_and(|module_path| module_path.starts_with(workspace_root)),
+                VendoredLibrariesConfig::Excluded => false,
+            };
+
+            !source_root.is_library || is_vendored
         });
         let mut this = StaticIndex {
             files: vec![],
@@ -207,7 +274,7 @@ impl StaticIndex<'_> {
             if visited_files.contains(&file_id) {
                 continue;
             }
-            this.add_file(file_id);
+            this.add_file(file_id.into());
             // mark the file
             visited_files.insert(file_id);
         }
@@ -218,14 +285,15 @@ impl StaticIndex<'_> {
 #[cfg(test)]
 mod tests {
     use crate::{fixture, StaticIndex};
-    use ide_db::base_db::FileRange;
-    use std::collections::HashSet;
+    use ide_db::{base_db::VfsPath, FileRange, FxHashSet};
     use syntax::TextSize;
 
-    fn check_all_ranges(ra_fixture: &str) {
+    use super::VendoredLibrariesConfig;
+
+    fn check_all_ranges(ra_fixture: &str, vendored_libs_config: VendoredLibrariesConfig<'_>) {
         let (analysis, ranges) = fixture::annotations_without_marker(ra_fixture);
-        let s = StaticIndex::compute(&analysis);
-        let mut range_set: HashSet<_> = ranges.iter().map(|it| it.0).collect();
+        let s = StaticIndex::compute(&analysis, vendored_libs_config);
+        let mut range_set: FxHashSet<_> = ranges.iter().map(|it| it.0).collect();
         for f in s.files {
             for (range, _) in f.tokens {
                 let it = FileRange { file_id: f.file_id, range };
@@ -240,10 +308,11 @@ mod tests {
         }
     }
 
-    fn check_definitions(ra_fixture: &str) {
+    #[track_caller]
+    fn check_definitions(ra_fixture: &str, vendored_libs_config: VendoredLibrariesConfig<'_>) {
         let (analysis, ranges) = fixture::annotations_without_marker(ra_fixture);
-        let s = StaticIndex::compute(&analysis);
-        let mut range_set: HashSet<_> = ranges.iter().map(|it| it.0).collect();
+        let s = StaticIndex::compute(&analysis, vendored_libs_config);
+        let mut range_set: FxHashSet<_> = ranges.iter().map(|it| it.0).collect();
         for (_, t) in s.tokens.iter() {
             if let Some(t) = t.definition {
                 if t.range.start() == TextSize::from(0) {
@@ -270,6 +339,9 @@ struct Foo;
 enum E { X(Foo) }
    //^   ^ ^^^
 "#,
+            VendoredLibrariesConfig::Included {
+                workspace_root: &VfsPath::new_virtual_path("/workspace".to_owned()),
+            },
         );
         check_definitions(
             r#"
@@ -278,6 +350,9 @@ struct Foo;
 enum E { X(Foo) }
    //^   ^
 "#,
+            VendoredLibrariesConfig::Included {
+                workspace_root: &VfsPath::new_virtual_path("/workspace".to_owned()),
+            },
         );
     }
 
@@ -285,7 +360,7 @@ enum E { X(Foo) }
     fn multi_crate() {
         check_definitions(
             r#"
-//- /main.rs crate:main deps:foo
+//- /workspace/main.rs crate:main deps:foo
 
 
 use foo::func;
@@ -294,13 +369,55 @@ fn main() {
  //^^^^
     func();
 }
-//- /foo/lib.rs crate:foo
+//- /workspace/foo/lib.rs crate:foo
 
 pub func() {
 
 }
 "#,
+            VendoredLibrariesConfig::Included {
+                workspace_root: &VfsPath::new_virtual_path("/workspace".to_owned()),
+            },
         );
+    }
+
+    #[test]
+    fn vendored_crate() {
+        check_all_ranges(
+            r#"
+//- /workspace/main.rs crate:main deps:external,vendored
+struct Main(i32);
+     //^^^^ ^^^
+
+//- /external/lib.rs new_source_root:library crate:external@0.1.0,https://a.b/foo.git library
+struct ExternalLibrary(i32);
+
+//- /workspace/vendored/lib.rs new_source_root:library crate:vendored@0.1.0,https://a.b/bar.git library
+struct VendoredLibrary(i32);
+     //^^^^^^^^^^^^^^^ ^^^
+"#,
+            VendoredLibrariesConfig::Included {
+                workspace_root: &VfsPath::new_virtual_path("/workspace".to_owned()),
+            },
+        );
+    }
+
+    #[test]
+    fn vendored_crate_excluded() {
+        check_all_ranges(
+            r#"
+//- /workspace/main.rs crate:main deps:external,vendored
+struct Main(i32);
+     //^^^^ ^^^
+
+//- /external/lib.rs new_source_root:library crate:external@0.1.0,https://a.b/foo.git library
+struct ExternalLibrary(i32);
+
+//- /workspace/vendored/lib.rs new_source_root:library crate:vendored@0.1.0,https://a.b/bar.git library
+struct VendoredLibrary(i32);
+"#,
+            VendoredLibrariesConfig::Excluded,
+        )
     }
 
     #[test]
@@ -317,6 +434,9 @@ pub macro Copy {}
 struct Hello(i32);
      //^^^^^ ^^^
 "#,
+            VendoredLibrariesConfig::Included {
+                workspace_root: &VfsPath::new_virtual_path("/workspace".to_owned()),
+            },
         );
     }
 }

@@ -1,20 +1,23 @@
 use core::cmp::Ordering;
-use rustc_index::IndexVec;
-use rustc_middle::ty::error::TypeError;
 use std::cmp;
 
+use rustc_index::IndexVec;
+use rustc_middle::ty::error::TypeError;
+
 rustc_index::newtype_index! {
+    #[orderable]
     #[debug_format = "ExpectedIdx({})"]
     pub(crate) struct ExpectedIdx {}
 }
 
 rustc_index::newtype_index! {
+    #[orderable]
     #[debug_format = "ProvidedIdx({})"]
     pub(crate) struct ProvidedIdx {}
 }
 
 impl ExpectedIdx {
-    pub fn to_provided_idx(self) -> ProvidedIdx {
+    pub(crate) fn to_provided_idx(self) -> ProvidedIdx {
         ProvidedIdx::from_usize(self.as_usize())
     }
 }
@@ -304,7 +307,7 @@ impl<'tcx> ArgMatrix<'tcx> {
                 permutation.into_iter().map(|x| x.unwrap()).collect();
             return Some(Issue::Permutation(final_permutation));
         }
-        return None;
+        None
     }
 
     // Obviously, detecting exact user intention is impossible, so the goal here is to
@@ -407,6 +410,6 @@ impl<'tcx> ArgMatrix<'tcx> {
         // sort errors with same type by the order they appear in the source
         // so that suggestion will be handled properly, see #112507
         errors.sort();
-        return (errors, matched_inputs);
+        (errors, matched_inputs)
     }
 }

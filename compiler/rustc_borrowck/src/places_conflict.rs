@@ -3,7 +3,7 @@
 //! we can prove overlap one way or another. Essentially, we treat `Overlap` as
 //! a monoid and report a conflict if the product ends up not being `Disjoint`.
 //!
-//! At each step, if we didn't run out of borrow or place, we know that our elements
+//! On each step, if we didn't run out of borrow or place, we know that our elements
 //! have the same type, and that they only overlap if they are the identical.
 //!
 //! For example, if we are comparing these:
@@ -50,18 +50,18 @@
 //!    and either equal or disjoint.
 //!  - If we did run out of access, the borrow can access a part of it.
 
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
-use crate::ArtificialField;
-use crate::Overlap;
-use crate::{AccessDepth, Deep, Shallow};
-use rustc_hir as hir;
-use rustc_middle::mir::{
-    Body, BorrowKind, MutBorrowKind, Place, PlaceElem, PlaceRef, ProjectionElem,
-};
-use rustc_middle::ty::{self, TyCtxt};
 use std::cmp::max;
 use std::iter;
+
+use rustc_hir as hir;
+use rustc_middle::bug;
+use rustc_middle::mir::{
+    Body, BorrowKind, FakeBorrowKind, MutBorrowKind, Place, PlaceElem, PlaceRef, ProjectionElem,
+};
+use rustc_middle::ty::{self, TyCtxt};
+use tracing::{debug, instrument};
+
+use crate::{AccessDepth, ArtificialField, Deep, Overlap, Shallow};
 
 /// When checking if a place conflicts with another place, this enum is used to influence decisions
 /// where a place might be equal or disjoint with another place, such as if `a[i] == a[j]`.
@@ -202,9 +202,8 @@ fn place_components_conflict<'tcx>(
 
             let base_ty = base.ty(body, tcx).ty;
 
-            match (elem, &base_ty.kind(), access) {
-                (_, _, Shallow(Some(ArtificialField::ArrayLength)))
-                | (_, _, Shallow(Some(ArtificialField::ShallowBorrow))) => {
+            match (elem, base_ty.kind(), access) {
+                (_, _, Shallow(Some(ArtificialField::FakeBorrow))) => {
                     // The array length is like additional fields on the
                     // type; it does not overlap any existing data there.
                     // Furthermore, if cannot actually be a prefix of any
@@ -249,6 +248,7 @@ fn place_components_conflict<'tcx>(
                 | (ProjectionElem::ConstantIndex { .. }, _, _)
                 | (ProjectionElem::Subslice { .. }, _, _)
                 | (ProjectionElem::OpaqueCast { .. }, _, _)
+                | (ProjectionElem::Subtype(_), _, _)
                 | (ProjectionElem::Downcast { .. }, _, _) => {
                     // Recursive case. This can still be disjoint on a
                     // further iteration if this a shallow access and
@@ -272,7 +272,7 @@ fn place_components_conflict<'tcx>(
     // If the second example, where we did, then we still know
     // that the borrow can access a *part* of our place that
     // our access cares about, so we still have a conflict.
-    if borrow_kind == BorrowKind::Shallow
+    if borrow_kind == BorrowKind::Fake(FakeBorrowKind::Shallow)
         && borrow_place.projection.len() < access_place.projection.len()
     {
         debug!("borrow_conflicts_with_place: shallow borrow");
@@ -508,6 +508,7 @@ fn place_projection_conflict<'tcx>(
             | ProjectionElem::Field(..)
             | ProjectionElem::Index(..)
             | ProjectionElem::ConstantIndex { .. }
+            | ProjectionElem::Subtype(_)
             | ProjectionElem::OpaqueCast { .. }
             | ProjectionElem::Subslice { .. }
             | ProjectionElem::Downcast(..),

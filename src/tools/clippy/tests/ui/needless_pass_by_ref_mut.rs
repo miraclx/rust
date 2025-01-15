@@ -1,5 +1,10 @@
-#![allow(clippy::if_same_then_else, clippy::no_effect)]
-#![feature(lint_reasons)]
+#![allow(
+    clippy::if_same_then_else,
+    clippy::no_effect,
+    clippy::redundant_closure_call,
+    clippy::ptr_arg
+)]
+#![warn(clippy::needless_pass_by_ref_mut)]
 //@no-rustfix
 use std::ptr::NonNull;
 
@@ -38,15 +43,10 @@ fn non_mut_ref(_: &Vec<u32>) {}
 struct Bar;
 
 impl Bar {
-    // Should not warn on `&mut self`.
     fn bar(&mut self) {}
+    //~^ ERROR: this argument is a mutable reference, but not used mutably
 
     fn mushroom(&self, vec: &mut Vec<i32>) -> usize {
-        //~^ ERROR: this argument is a mutable reference, but not used mutably
-        vec.len()
-    }
-
-    fn badger(&mut self, vec: &mut Vec<i32>) -> usize {
         //~^ ERROR: this argument is a mutable reference, but not used mutably
         vec.len()
     }
@@ -230,6 +230,129 @@ async fn async_vec(b: &mut Vec<bool>) {
 async fn async_vec2(b: &mut Vec<bool>) {
     b.push(true);
 }
+fn non_mut(n: &str) {}
+//Should warn
+async fn call_in_closure1(n: &mut str) {
+    (|| non_mut(n))()
+}
+fn str_mut(str: &mut String) -> bool {
+    str.pop().is_some()
+}
+//Should not warn
+async fn call_in_closure2(str: &mut String) {
+    (|| str_mut(str))();
+}
+
+// Should not warn.
+async fn closure(n: &mut usize) -> impl '_ + FnMut() {
+    || {
+        *n += 1;
+    }
+}
+
+// Should warn.
+fn closure2(n: &mut usize) -> impl '_ + FnMut() -> usize {
+    //~^ ERROR: this argument is a mutable reference, but not used mutably
+    || *n + 1
+}
+
+// Should not warn.
+async fn closure3(n: &mut usize) {
+    (|| *n += 1)();
+}
+
+// Should warn.
+async fn closure4(n: &mut usize) {
+    //~^ ERROR: this argument is a mutable reference, but not used mutably
+    (|| {
+        let _x = *n + 1;
+    })();
+}
+
+// Should not warn: pub
+pub fn pub_foo(s: &mut Vec<u32>, b: &u32, x: &mut u32) {
+    *x += *b + s.len() as u32;
+}
+
+// Should not warn.
+async fn _f(v: &mut Vec<()>) {
+    let x = || v.pop();
+    _ = || || x;
+}
+
+struct Data<T: ?Sized> {
+    value: T,
+}
+// Unsafe functions should not warn.
+unsafe fn get_mut_unchecked<T>(ptr: &mut NonNull<Data<T>>) -> &mut T {
+    &mut (*ptr.as_ptr()).value
+}
+// Unsafe blocks should not warn.
+fn get_mut_unchecked2<T>(ptr: &mut NonNull<Data<T>>) -> &mut T {
+    unsafe { &mut (*ptr.as_ptr()).value }
+}
+
+fn set_true(b: &mut bool) {
+    *b = true;
+}
+
+// Should not warn.
+fn true_setter(b: &mut bool) -> impl FnOnce() + '_ {
+    move || set_true(b)
+}
+
+// Should not warn.
+fn filter_copy<T: Copy>(predicate: &mut impl FnMut(T) -> bool) -> impl FnMut(&T) -> bool + '_ {
+    move |&item| predicate(item)
+}
+
+trait MutSelfTrait {
+    // Should not warn since it's a trait method.
+    fn mut_self(&mut self);
+}
+
+struct MutSelf {
+    a: u32,
+}
+
+impl MutSelf {
+    fn bar(&mut self) {}
+    //~^ ERROR: this argument is a mutable reference, but not used mutably
+    async fn foo(&mut self, u: &mut i32, v: &mut u32) {
+        //~^ ERROR: this argument is a mutable reference, but not used mutably
+        //~| ERROR: this argument is a mutable reference, but not used mutably
+        async {
+            *u += 1;
+        }
+        .await;
+    }
+    async fn foo2(&mut self, u: &mut i32, v: &mut u32) {
+        //~^ ERROR: this argument is a mutable reference, but not used mutably
+        async {
+            self.a += 1;
+            *u += 1;
+        }
+        .await;
+    }
+}
+
+impl MutSelfTrait for MutSelf {
+    // Should not warn since it's a trait method.
+    fn mut_self(&mut self) {}
+}
+
+// `is_from_proc_macro` stress tests
+fn _empty_tup(x: &mut (())) {}
+fn _single_tup(x: &mut ((i32,))) {}
+fn _multi_tup(x: &mut ((i32, u32))) {}
+fn _fn(x: &mut (fn())) {}
+#[rustfmt::skip]
+fn _extern_rust_fn(x: &mut extern "Rust" fn()) {}
+fn _extern_c_fn(x: &mut extern "C" fn()) {}
+fn _unsafe_fn(x: &mut unsafe fn()) {}
+fn _unsafe_extern_fn(x: &mut unsafe extern "C" fn()) {}
+fn _fn_with_arg(x: &mut unsafe extern "C" fn(i32)) {}
+fn _fn_with_ret(x: &mut unsafe extern "C" fn() -> (i32)) {}
 
 fn main() {
     let mut u = 0;
@@ -247,4 +370,5 @@ fn main() {
     used_as_path;
     let _: fn(&mut u32) = passed_as_local;
     let _ = if v[0] == 0 { ty_unify_1 } else { ty_unify_2 };
+    pub_foo(&mut v, &0, &mut u);
 }

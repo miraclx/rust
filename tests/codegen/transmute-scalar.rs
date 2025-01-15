@@ -1,4 +1,4 @@
-// compile-flags: -C opt-level=0 -C no-prepopulate-passes
+//@ compile-flags: -C opt-level=0 -C no-prepopulate-passes
 
 #![crate_type = "lib"]
 
@@ -25,7 +25,7 @@ pub fn bool_to_byte(b: bool) -> u8 {
     unsafe { std::mem::transmute(b) }
 }
 
-// CHECK-LABEL: define{{.*}}zeroext i1 @byte_to_bool(i8 %byte)
+// CHECK-LABEL: define{{.*}}zeroext i1 @byte_to_bool(i8{{.*}} %byte)
 // CHECK: %_0 = trunc i8 %byte to i1
 // CHECK-NEXT: ret i1 %_0
 #[no_mangle]
@@ -49,7 +49,7 @@ pub fn ptr_to_int(p: *mut u16) -> usize {
 }
 
 // CHECK: define{{.*}}ptr @int_to_ptr([[USIZE]] %i)
-// CHECK: %_0 = inttoptr [[USIZE]] %i to ptr
+// CHECK: %_0 = getelementptr i8, ptr null, [[USIZE]] %i
 // CHECK-NEXT: ret ptr %_0
 #[no_mangle]
 pub fn int_to_ptr(i: usize) -> *mut u16 {

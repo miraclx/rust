@@ -8,17 +8,12 @@
 
 #![deny(unsafe_code)]
 
-use crate::{Delimiter, Level, Spacing};
-use std::fmt;
 use std::hash::Hash;
-use std::marker;
-use std::mem;
-use std::ops::Bound;
-use std::ops::Range;
-use std::panic;
-use std::sync::atomic::AtomicUsize;
+use std::ops::{Bound, Range};
 use std::sync::Once;
-use std::thread;
+use std::{fmt, marker, mem, panic, thread};
+
+use crate::{Delimiter, Level, Spacing};
 
 /// Higher-order macro describing the server RPC API, allowing automatic
 /// generation of type-safe Rust APIs, both client-side and server-side.
@@ -55,6 +50,7 @@ macro_rules! with_api {
         $m! {
             FreeFunctions {
                 fn drop($self: $S::FreeFunctions);
+                fn injected_env_var(var: &str) -> Option<String>;
                 fn track_env_var(var: &str, value: Option<&str>);
                 fn track_path(path: &str);
                 fn literal_from_str(s: &str) -> Result<Literal<$S::Span, $S::Symbol>, ()>;
@@ -113,6 +109,23 @@ macro_rules! with_api {
     };
 }
 
+// Similar to `with_api`, but only lists the types requiring handles, and they
+// are divided into the two storage categories.
+macro_rules! with_api_handle_types {
+    ($m:ident) => {
+        $m! {
+            'owned:
+            FreeFunctions,
+            TokenStream,
+            SourceFile,
+
+            'interned:
+            Span,
+            // Symbol is handled manually
+        }
+    };
+}
+
 // FIXME(eddyb) this calls `encode` for each argument, but in reverse,
 // to match the ordering in `reverse_decode`.
 macro_rules! reverse_encode {
@@ -137,7 +150,7 @@ macro_rules! reverse_decode {
 mod arena;
 #[allow(unsafe_code)]
 mod buffer;
-#[forbid(unsafe_code)]
+#[deny(unsafe_code)]
 pub mod client;
 #[allow(unsafe_code)]
 mod closure;
@@ -148,8 +161,6 @@ mod handle;
 #[macro_use]
 #[forbid(unsafe_code)]
 mod rpc;
-#[allow(unsafe_code)]
-mod scoped_cell;
 #[allow(unsafe_code)]
 mod selfless_reify;
 #[forbid(unsafe_code)]
@@ -337,7 +348,11 @@ pub enum LitKind {
     ByteStrRaw(u8),
     CStr,
     CStrRaw(u8),
-    Err,
+    // This should have an `ErrorGuaranteed`, except that type isn't available
+    // in this crate. (Imagine it is there.) Hence the `WithGuar` suffix. Must
+    // only be constructed in `LitKind::from_internal`, where an
+    // `ErrorGuaranteed` is available.
+    ErrWithGuar,
 }
 
 rpc_encode_decode!(
@@ -352,7 +367,7 @@ rpc_encode_decode!(
         ByteStrRaw(n),
         CStr,
         CStrRaw(n),
-        Err,
+        ErrWithGuar,
     }
 );
 

@@ -1,12 +1,32 @@
-#![feature(portable_simd)]
-use std::mem;
-use std::num;
-use std::simd;
+#![feature(never_type)]
 
-#[derive(Copy, Clone)]
+use std::rc::Rc;
+use std::{mem, num, ptr};
+
+#[derive(Copy, Clone, Default)]
 struct Zst;
 
-fn test_abi_compat<T: Copy, U: Copy>(t: T, u: U) {
+#[repr(transparent)]
+#[derive(Copy, Clone)]
+struct Wrapper<T>(T);
+
+fn id<T>(x: T) -> T {
+    x
+}
+
+#[derive(Copy, Clone)]
+enum Either<T, U> {
+    Left(T),
+    Right(U),
+}
+#[derive(Copy, Clone)]
+enum Either2<T, U> {
+    Left(T),
+    #[allow(unused)]
+    Right(U, ()),
+}
+
+fn test_abi_compat<T: Clone, U: Clone>(t: T, u: U) {
     fn id<T>(x: T) -> T {
         x
     }
@@ -18,10 +38,10 @@ fn test_abi_compat<T: Copy, U: Copy>(t: T, u: U) {
     // in both directions.
     let f: fn(T) -> T = id;
     let f: fn(U) -> U = unsafe { std::mem::transmute(f) };
-    let _val = f(u);
+    let _val = f(u.clone());
     let f: fn(U) -> U = id;
     let f: fn(T) -> T = unsafe { std::mem::transmute(f) };
-    let _val = f(t);
+    let _val = f(t.clone());
 
     // And then we do the same for `extern "C"`.
     let f: extern "C" fn(T) -> T = id_c;
@@ -33,10 +53,7 @@ fn test_abi_compat<T: Copy, U: Copy>(t: T, u: U) {
 }
 
 /// Ensure that `T` is compatible with various repr(transparent) wrappers around `T`.
-fn test_abi_newtype<T: Copy>(t: T) {
-    #[repr(transparent)]
-    #[derive(Copy, Clone)]
-    struct Wrapper1<T>(T);
+fn test_abi_newtype<T: Copy + Default>() {
     #[repr(transparent)]
     #[derive(Copy, Clone)]
     struct Wrapper2<T>(T, ());
@@ -47,7 +64,8 @@ fn test_abi_newtype<T: Copy>(t: T) {
     #[derive(Copy, Clone)]
     struct Wrapper3<T>(Zst, T, [u8; 0]);
 
-    test_abi_compat(t, Wrapper1(t));
+    let t = T::default();
+    test_abi_compat(t, Wrapper(t));
     test_abi_compat(t, Wrapper2(t, ()));
     test_abi_compat(t, Wrapper2a((), t));
     test_abi_compat(t, Wrapper3(Zst, t, []));
@@ -55,37 +73,75 @@ fn test_abi_newtype<T: Copy>(t: T) {
 }
 
 fn main() {
-    // Here we check:
-    // - unsigned vs signed integer is allowed
-    // - u32/i32 vs char is allowed
-    // - u32 vs NonZeroU32/Option<NonZeroU32> is allowed
-    // - reference vs raw pointer is allowed
-    // - references to things of the same size and alignment are allowed
-    // These are very basic tests that should work on all ABIs. However it is not clear that any of
-    // these would be stably guaranteed. Code that relies on this is equivalent to code that relies
-    // on the layout of `repr(Rust)` types. They are also fragile: the same mismatches in the fields
-    // of a struct (even with `repr(C)`) will not always be accepted by Miri.
-    test_abi_compat(0u32, 0i32);
-    test_abi_compat(simd::u32x8::splat(1), simd::i32x8::splat(1));
-    test_abi_compat(0u32, 'x');
-    test_abi_compat(0i32, 'x');
-    test_abi_compat(42u32, num::NonZeroU32::new(1).unwrap());
-    test_abi_compat(0u32, Some(num::NonZeroU32::new(1).unwrap()));
+    // Here we check some of the guaranteed ABI compatibilities:
+    // - Different integer types of the same size and sign.
+    if cfg!(target_pointer_width = "32") {
+        test_abi_compat(0usize, 0u32);
+        test_abi_compat(0isize, 0i32);
+    } else {
+        test_abi_compat(0usize, 0u64);
+        test_abi_compat(0isize, 0i64);
+    }
+    test_abi_compat(42u32, num::NonZero::new(1u32).unwrap());
+    // - `char` and `u32`.
+    test_abi_compat(42u32, 'x');
+    // - Reference/pointer types with the same pointee.
     test_abi_compat(&0u32, &0u32 as *const u32);
+    test_abi_compat(&mut 0u32 as *mut u32, Box::new(0u32));
+    test_abi_compat(&(), ptr::NonNull::<()>::dangling());
+    // - Reference/pointer types with different but sized pointees.
     test_abi_compat(&0u32, &([true; 4], [0u32; 0]));
-    // Note that `bool` and `u8` are *not* compatible, at least on x86-64!
-    // One of them has `arg_ext: Zext`, the other does not.
+    // - `fn` types
+    test_abi_compat(main as fn(), id::<i32> as fn(i32) -> i32);
+    // - 1-ZST
+    test_abi_compat((), [0u8; 0]);
+
+    // Guaranteed null-pointer-layout optimizations:
+    // - Guaranteed Option<X> null-pointer-optimizations (RFC 3391).
+    test_abi_compat(&0u32 as *const u32, Some(&0u32));
+    test_abi_compat(main as fn(), Some(main as fn()));
+    test_abi_compat(0u32, Some(num::NonZero::new(1u32).unwrap()));
+    test_abi_compat(&0u32 as *const u32, Some(Wrapper(&0u32)));
+    test_abi_compat(0u32, Some(Wrapper(num::NonZeroU32::new(1u32).unwrap())));
+    // - Guaranteed Result<X, ZST1> does the same as Option<X> (RFC 3391)
+    test_abi_compat(&0u32 as *const u32, Result::<_, ()>::Ok(&0u32));
+    test_abi_compat(&0u32 as *const u32, Result::<_, !>::Ok(&0u32));
+    test_abi_compat(main as fn(), Result::<_, ()>::Ok(main as fn()));
+    test_abi_compat(0u32, Result::<_, ()>::Ok(num::NonZeroU32::new(1).unwrap()));
+    test_abi_compat(&0u32 as *const u32, Result::<_, ()>::Ok(Wrapper(&0u32)));
+    test_abi_compat(0u32, Result::<_, ()>::Ok(Wrapper(num::NonZeroU32::new(1).unwrap())));
+    // - Guaranteed Result<ZST1, X> also does the same as Option<X> (RFC 3391)
+    test_abi_compat(&0u32 as *const u32, Result::<(), _>::Err(&0u32));
+    test_abi_compat(main as fn(), Result::<(), _>::Err(main as fn()));
+    test_abi_compat(0u32, Result::<(), _>::Err(num::NonZeroU32::new(1).unwrap()));
+    test_abi_compat(&0u32 as *const u32, Result::<(), _>::Err(Wrapper(&0u32)));
+    test_abi_compat(0u32, Result::<(), _>::Err(Wrapper(num::NonZeroU32::new(1).unwrap())));
+    // - Guaranteed null-pointer-optimizations for custom option-like types
+    test_abi_compat(&0u32 as *const u32, Either::<_, ()>::Left(&0u32));
+    test_abi_compat(&0u32 as *const u32, Either::<_, !>::Left(&0u32));
+    test_abi_compat(&0u32 as *const u32, Either::<(), _>::Right(&0u32));
+    test_abi_compat(&0u32 as *const u32, Either::<!, _>::Right(&0u32));
+    test_abi_compat(&0u32 as *const u32, Either2::<_, ()>::Left(&0u32));
+    test_abi_compat(&0u32 as *const u32, Either2::<_, [u8; 0]>::Left(&0u32));
 
     // These must work for *any* type, since we guarantee that `repr(transparent)` is ABI-compatible
     // with the wrapped field.
-    test_abi_newtype(());
-    // FIXME: this still fails! test_abi_newtype(Zst);
-    test_abi_newtype(0u32);
-    test_abi_newtype(0f32);
-    test_abi_newtype((0u32, 1u32, 2u32));
-    // FIXME: skipping the array tests on mips64 due to https://github.com/rust-lang/rust/issues/115404
-    if !cfg!(target_arch = "mips64") {
-        test_abi_newtype([0u32, 1u32, 2u32]);
-        test_abi_newtype([0i32; 0]);
-    }
+    test_abi_newtype::<()>();
+    test_abi_newtype::<Zst>();
+    test_abi_newtype::<u32>();
+    test_abi_newtype::<f32>();
+    test_abi_newtype::<(u8, u16, f32)>();
+    test_abi_newtype::<[u8; 0]>();
+    test_abi_newtype::<[u32; 0]>();
+    test_abi_newtype::<[u32; 2]>();
+    test_abi_newtype::<[u32; 32]>();
+    test_abi_newtype::<Option<i32>>();
+    test_abi_newtype::<Option<num::NonZero<u32>>>();
+
+    // Extra test for assumptions made by arbitrary-self-dyn-receivers.
+    // This is interesting since these types are not `repr(transparent)`. So this is not part of our
+    // public ABI guarantees, but is relied on by the compiler.
+    let rc = Rc::new(0);
+    let rc_ptr: *mut i32 = unsafe { mem::transmute_copy(&rc) };
+    test_abi_compat(rc, rc_ptr);
 }

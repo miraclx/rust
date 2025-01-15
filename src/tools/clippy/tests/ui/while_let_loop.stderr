@@ -1,19 +1,19 @@
 error: this loop could be written as a `while let` loop
-  --> $DIR/while_let_loop.rs:6:5
+  --> tests/ui/while_let_loop.rs:6:5
    |
 LL | /     loop {
 LL | |
 LL | |
 LL | |         if let Some(_x) = y {
 ...  |
-LL | |         }
 LL | |     }
    | |_____^ help: try: `while let Some(_x) = y { .. }`
    |
    = note: `-D clippy::while-let-loop` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::while_let_loop)]`
 
 error: this loop could be written as a `while let` loop
-  --> $DIR/while_let_loop.rs:25:5
+  --> tests/ui/while_let_loop.rs:25:5
    |
 LL | /     loop {
 LL | |
@@ -25,7 +25,7 @@ LL | |     }
    | |_____^ help: try: `while let Some(_x) = y { .. }`
 
 error: this loop could be written as a `while let` loop
-  --> $DIR/while_let_loop.rs:33:5
+  --> tests/ui/while_let_loop.rs:33:5
    |
 LL | /     loop {
 LL | |
@@ -37,19 +37,18 @@ LL | |     }
    | |_____^ help: try: `while let Some(x) = y { .. }`
 
 error: this loop could be written as a `while let` loop
-  --> $DIR/while_let_loop.rs:43:5
+  --> tests/ui/while_let_loop.rs:43:5
    |
 LL | /     loop {
 LL | |
 LL | |         let x = match y {
 LL | |             Some(x) => x,
 ...  |
-LL | |         }
 LL | |     }
    | |_____^ help: try: `while let Some(x) = y { .. }`
 
 error: this loop could be written as a `while let` loop
-  --> $DIR/while_let_loop.rs:74:5
+  --> tests/ui/while_let_loop.rs:74:5
    |
 LL | /     loop {
 LL | |

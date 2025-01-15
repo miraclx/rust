@@ -1,5 +1,3 @@
-#![feature(return_position_impl_trait_in_trait)]
-
 use std::ops::Deref;
 
 pub trait Foo {
@@ -8,6 +6,7 @@ pub trait Foo {
 
 pub struct Foreign;
 impl Foo for Foreign {
+    #[expect(refining_impl_trait)]
     fn bar(self) -> &'static () {
         &()
     }

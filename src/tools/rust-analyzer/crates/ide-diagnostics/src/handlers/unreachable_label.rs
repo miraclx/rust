@@ -9,8 +9,8 @@ pub(crate) fn unreachable_label(
     Diagnostic::new_with_syntax_node_ptr(
         ctx,
         DiagnosticCode::RustcHardError("E0767"),
-        format!("use of unreachable label `{}`", name.display(ctx.sema.db)),
-        d.node.clone().map(|it| it.into()),
+        format!("use of unreachable label `{}`", name.display(ctx.sema.db, ctx.edition)),
+        d.node.map(|it| it.into()),
     )
 }
 

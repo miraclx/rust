@@ -1,4 +1,3 @@
-#![cfg_attr(feature = "deny-warnings", deny(warnings))]
 #![warn(rust_2018_idioms, unused_lifetimes)]
 #![allow(clippy::assertions_on_constants)]
 #![feature(path_file_prefix)]
@@ -54,13 +53,13 @@ fn explore_directory(dir: &Path) -> Vec<String> {
             let file_prefix = path.file_prefix().unwrap().to_str().unwrap().to_string();
             if let Some(ext) = path.extension() {
                 match ext.to_str().unwrap() {
-                    "rs" | "toml" => current_file = file_prefix.clone(),
+                    "rs" | "toml" => current_file.clone_from(&file_prefix),
                     "stderr" | "stdout" => {
                         if file_prefix != current_file {
                             missing_files.push(path.to_str().unwrap().to_string());
                         }
                     },
-                    _ => continue,
+                    _ => {},
                 };
             }
         }

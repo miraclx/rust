@@ -1,14 +1,15 @@
-use crate::errors::UnconditionalRecursion;
+use std::ops::ControlFlow;
+
 use rustc_data_structures::graph::iterate::{
     NodeStatus, TriColorDepthFirstSearch, TriColorVisitor,
 };
 use rustc_hir::def::DefKind;
 use rustc_middle::mir::{self, BasicBlock, BasicBlocks, Body, Terminator, TerminatorKind};
-use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
-use rustc_middle::ty::{GenericArg, GenericArgs};
+use rustc_middle::ty::{self, GenericArg, GenericArgs, Instance, Ty, TyCtxt};
 use rustc_session::lint::builtin::UNCONDITIONAL_RECURSION;
 use rustc_span::Span;
-use std::ops::ControlFlow;
+
+use crate::errors::UnconditionalRecursion;
 
 pub(crate) fn check<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) {
     check_call_recursion(tcx, body);
@@ -52,13 +53,11 @@ fn check_recursion<'tcx>(
         vis.reachable_recursive_calls.sort();
 
         let sp = tcx.def_span(def_id);
-        let hir_id = tcx.hir().local_def_id_to_hir_id(def_id);
-        tcx.emit_spanned_lint(
-            UNCONDITIONAL_RECURSION,
-            hir_id,
-            sp,
-            UnconditionalRecursion { span: sp, call_sites: vis.reachable_recursive_calls },
-        );
+        let hir_id = tcx.local_def_id_to_hir_id(def_id);
+        tcx.emit_node_span_lint(UNCONDITIONAL_RECURSION, hir_id, sp, UnconditionalRecursion {
+            span: sp,
+            call_sites: vis.reachable_recursive_calls,
+        });
     }
 }
 
@@ -67,16 +66,20 @@ pub fn check_drop_recursion<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) {
     let def_id = body.source.def_id().expect_local();
 
     // First check if `body` is an `fn drop()` of `Drop`
-    if let DefKind::AssocFn = tcx.def_kind(def_id) &&
-        let Some(trait_ref) = tcx.impl_of_method(def_id.to_def_id()).and_then(|def_id| tcx.impl_trait_ref(def_id)) &&
-        let Some(drop_trait) = tcx.lang_items().drop_trait() && drop_trait == trait_ref.instantiate_identity().def_id {
-
+    if let DefKind::AssocFn = tcx.def_kind(def_id)
+        && let Some(trait_ref) =
+            tcx.impl_of_method(def_id.to_def_id()).and_then(|def_id| tcx.impl_trait_ref(def_id))
+        && let Some(drop_trait) = tcx.lang_items().drop_trait()
+        && drop_trait == trait_ref.instantiate_identity().def_id
+        // avoid erroneous `Drop` impls from causing ICEs below
+        && let sig = tcx.fn_sig(def_id).instantiate_identity()
+        && sig.inputs().skip_binder().len() == 1
+    {
         // It was. Now figure out for what type `Drop` is implemented and then
         // check for recursion.
-        if let ty::Ref(_, dropped_ty, _) = tcx.liberate_late_bound_regions(
-            def_id.to_def_id(),
-            tcx.fn_sig(def_id).instantiate_identity().input(0),
-        ).kind() {
+        if let ty::Ref(_, dropped_ty, _) =
+            tcx.liberate_late_bound_regions(def_id.to_def_id(), sig.input(0)).kind()
+        {
             check_recursion(tcx, body, RecursiveDrop { drop_for: *dropped_ty });
         }
     }
@@ -129,13 +132,15 @@ impl<'tcx> TerminatorClassifier<'tcx> for CallRecursion<'tcx> {
             return false;
         }
         let caller = body.source.def_id();
-        let param_env = tcx.param_env(caller);
+        let typing_env = body.typing_env(tcx);
 
         let func_ty = func.ty(body, tcx);
         if let ty::FnDef(callee, args) = *func_ty.kind() {
-            let normalized_args = tcx.normalize_erasing_regions(param_env, args);
+            let Ok(normalized_args) = tcx.try_normalize_erasing_regions(typing_env, args) else {
+                return false;
+            };
             let (callee, call_args) = if let Ok(Some(instance)) =
-                Instance::resolve(tcx, param_env, callee, normalized_args)
+                Instance::try_resolve(tcx, typing_env, callee, normalized_args)
             {
                 (instance.def_id(), instance.args)
             } else {
@@ -187,15 +192,16 @@ impl<'mir, 'tcx, C: TerminatorClassifier<'tcx>> TriColorVisitor<BasicBlocks<'tcx
         match self.body[bb].terminator().kind {
             // These terminators return control flow to the caller.
             TerminatorKind::UnwindTerminate(_)
-            | TerminatorKind::GeneratorDrop
+            | TerminatorKind::CoroutineDrop
             | TerminatorKind::UnwindResume
             | TerminatorKind::Return
             | TerminatorKind::Unreachable
             | TerminatorKind::Yield { .. } => ControlFlow::Break(NonRecursive),
 
-            // A diverging InlineAsm is treated as non-recursing
-            TerminatorKind::InlineAsm { destination, .. } => {
-                if destination.is_some() {
+            // A InlineAsm without targets (diverging and contains no labels)
+            // is treated as non-recursing.
+            TerminatorKind::InlineAsm { ref targets, .. } => {
+                if !targets.is_empty() {
                     ControlFlow::Continue(())
                 } else {
                     ControlFlow::Break(NonRecursive)
@@ -210,12 +216,28 @@ impl<'mir, 'tcx, C: TerminatorClassifier<'tcx>> TriColorVisitor<BasicBlocks<'tcx
             | TerminatorKind::FalseUnwind { .. }
             | TerminatorKind::Goto { .. }
             | TerminatorKind::SwitchInt { .. } => ControlFlow::Continue(()),
+
+            // Note that tail call terminator technically returns to the caller,
+            // but for purposes of this lint it makes sense to count it as possibly recursive,
+            // since it's still a call.
+            //
+            // If this'll be repurposed for something else, this might need to be changed.
+            TerminatorKind::TailCall { .. } => ControlFlow::Continue(()),
         }
     }
 
     fn node_settled(&mut self, bb: BasicBlock) -> ControlFlow<Self::BreakVal> {
         // When we examine a node for the last time, remember it if it is a recursive call.
         let terminator = self.body[bb].terminator();
+
+        // FIXME(explicit_tail_calls): highlight tail calls as "recursive call site"
+        //
+        // We don't want to lint functions that recurse only through tail calls
+        // (such as `fn g() { become () }`), so just adding `| TailCall { ... }`
+        // here won't work.
+        //
+        // But at the same time we would like to highlight both calls in a function like
+        // `fn f() { if false { become f() } else { f() } }`, so we need to figure something out.
         if self.classifier.is_recursive_terminator(self.tcx, self.body, terminator) {
             self.reachable_recursive_calls.push(terminator.source_info.span);
         }

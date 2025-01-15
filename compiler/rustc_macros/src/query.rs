@@ -4,8 +4,8 @@ use syn::parse::{Parse, ParseStream, Result};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{
-    braced, parenthesized, parse_macro_input, parse_quote, token, AttrStyle, Attribute, Block,
-    Error, Expr, Ident, Pat, ReturnType, Token, Type,
+    AttrStyle, Attribute, Block, Error, Expr, Ident, Pat, ReturnType, Token, Type, braced,
+    parenthesized, parse_macro_input, parse_quote, token,
 };
 
 mod kw {
@@ -97,6 +97,9 @@ struct QueryModifiers {
     /// A cycle error results in a delay_bug call
     cycle_delay_bug: Option<Ident>,
 
+    /// A cycle error results in a stashed cycle error that can be unstashed and canceled later
+    cycle_stash: Option<Ident>,
+
     /// Don't hash the result, instead just mark a query red if it runs
     no_hash: Option<Ident>,
 
@@ -114,6 +117,12 @@ struct QueryModifiers {
 
     /// Generate a `feed` method to set the query's value from another query.
     feedable: Option<Ident>,
+
+    /// Forward the result on ensure if the query gets recomputed, and
+    /// return `Ok(())` otherwise. Only applicable to queries returning
+    /// `Result<T, ErrorGuaranteed>`. The `T` is not returned from `ensure`
+    /// invocations.
+    ensure_forwards_result_if_red: Option<Ident>,
 }
 
 fn parse_query_modifiers(input: ParseStream<'_>) -> Result<QueryModifiers> {
@@ -122,12 +131,14 @@ fn parse_query_modifiers(input: ParseStream<'_>) -> Result<QueryModifiers> {
     let mut desc = None;
     let mut fatal_cycle = None;
     let mut cycle_delay_bug = None;
+    let mut cycle_stash = None;
     let mut no_hash = None;
     let mut anon = None;
     let mut eval_always = None;
     let mut depth_limit = None;
     let mut separate_provide_extern = None;
     let mut feedable = None;
+    let mut ensure_forwards_result_if_red = None;
 
     while !input.is_empty() {
         let modifier: Ident = input.parse()?;
@@ -175,6 +186,8 @@ fn parse_query_modifiers(input: ParseStream<'_>) -> Result<QueryModifiers> {
             try_insert!(fatal_cycle = modifier);
         } else if modifier == "cycle_delay_bug" {
             try_insert!(cycle_delay_bug = modifier);
+        } else if modifier == "cycle_stash" {
+            try_insert!(cycle_stash = modifier);
         } else if modifier == "no_hash" {
             try_insert!(no_hash = modifier);
         } else if modifier == "anon" {
@@ -187,6 +200,8 @@ fn parse_query_modifiers(input: ParseStream<'_>) -> Result<QueryModifiers> {
             try_insert!(separate_provide_extern = modifier);
         } else if modifier == "feedable" {
             try_insert!(feedable = modifier);
+        } else if modifier == "ensure_forwards_result_if_red" {
+            try_insert!(ensure_forwards_result_if_red = modifier);
         } else {
             return Err(Error::new(modifier.span(), "unknown query modifier"));
         }
@@ -200,12 +215,14 @@ fn parse_query_modifiers(input: ParseStream<'_>) -> Result<QueryModifiers> {
         desc,
         fatal_cycle,
         cycle_delay_bug,
+        cycle_stash,
         no_hash,
         anon,
         eval_always,
         depth_limit,
         separate_provide_extern,
         feedable,
+        ensure_forwards_result_if_red,
     })
 }
 
@@ -290,13 +307,24 @@ fn add_query_desc_cached_impl(
     });
 }
 
-pub fn rustc_queries(input: TokenStream) -> TokenStream {
+pub(super) fn rustc_queries(input: TokenStream) -> TokenStream {
     let queries = parse_macro_input!(input as List<Query>);
 
     let mut query_stream = quote! {};
     let mut query_description_stream = quote! {};
     let mut query_cached_stream = quote! {};
     let mut feedable_queries = quote! {};
+    let mut errors = quote! {};
+
+    macro_rules! assert {
+        ( $cond:expr, $span:expr, $( $tt:tt )+ ) => {
+            if !$cond {
+                errors.extend(
+                    Error::new($span, format!($($tt)+)).into_compile_error(),
+                );
+            }
+        }
+    }
 
     for query in queries.0 {
         let Query { name, arg, modifiers, .. } = &query;
@@ -320,11 +348,13 @@ pub fn rustc_queries(input: TokenStream) -> TokenStream {
             fatal_cycle,
             arena_cache,
             cycle_delay_bug,
+            cycle_stash,
             no_hash,
             anon,
             eval_always,
             depth_limit,
             separate_provide_extern,
+            ensure_forwards_result_if_red,
         );
 
         if modifiers.cache.is_some() {
@@ -350,10 +380,15 @@ pub fn rustc_queries(input: TokenStream) -> TokenStream {
             [#attribute_stream] fn #name(#arg) #result,
         });
 
-        if modifiers.feedable.is_some() {
-            assert!(modifiers.anon.is_none(), "Query {name} cannot be both `feedable` and `anon`.");
+        if let Some(feedable) = &modifiers.feedable {
+            assert!(
+                modifiers.anon.is_none(),
+                feedable.span(),
+                "Query {name} cannot be both `feedable` and `anon`."
+            );
             assert!(
                 modifiers.eval_always.is_none(),
+                feedable.span(),
                 "Query {name} cannot be both `feedable` and `eval_always`."
             );
             feedable_queries.extend(quote! {
@@ -388,5 +423,6 @@ pub fn rustc_queries(input: TokenStream) -> TokenStream {
             use super::*;
             #query_cached_stream
         }
+        #errors
     })
 }

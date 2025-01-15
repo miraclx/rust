@@ -1,14 +1,9 @@
 //! Queries that are independent from the main solver code.
 
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
-#![feature(let_chains)]
+// tidy-alphabetical-start
 #![recursion_limit = "256"]
-
-#[macro_use]
-extern crate tracing;
-#[macro_use]
-extern crate rustc_middle;
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
 mod codegen;
 mod dropck_outlives;
@@ -18,10 +13,9 @@ mod normalize_erasing_regions;
 mod normalize_projection_ty;
 mod type_op;
 
+use rustc_middle::query::Providers;
 pub use rustc_trait_selection::traits::query::type_op::ascribe_user_type::type_op_ascribe_user_type_with_span;
 pub use type_op::type_op_prove_predicate_with_cause;
-
-use rustc_middle::query::Providers;
 
 pub fn provide(p: &mut Providers) {
     dropck_outlives::provide(p);

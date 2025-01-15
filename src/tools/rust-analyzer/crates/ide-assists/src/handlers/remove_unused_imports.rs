@@ -1,14 +1,16 @@
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::hash_map::Entry;
 
-use hir::{InFile, Module, ModuleSource};
+use hir::{FileRange, HirFileIdExt, InFile, InRealFile, Module, ModuleSource};
+use ide_db::text_edit::TextRange;
 use ide_db::{
-    base_db::FileRange,
     defs::Definition,
     search::{FileReference, ReferenceCategory, SearchScope},
-    RootDatabase,
+    FxHashMap, RootDatabase,
 };
-use syntax::{ast, AstNode};
-use text_edit::TextRange;
+use syntax::{
+    ast::{self, Rename},
+    AstNode,
+};
 
 use crate::{AssistContext, AssistId, AssistKind, Assists};
 
@@ -44,7 +46,7 @@ pub(crate) fn remove_unused_imports(acc: &mut Assists, ctx: &AssistContext<'_>) 
     let uses = uses_up.chain(uses_down).collect::<Vec<_>>();
 
     // Maps use nodes to the scope that we should search through to find
-    let mut search_scopes = HashMap::<Module, Vec<SearchScope>>::new();
+    let mut search_scopes = FxHashMap::<Module, Vec<SearchScope>>::default();
 
     // iterator over all unused use trees
     let mut unused = uses
@@ -54,7 +56,7 @@ pub(crate) fn remove_unused_imports(acc: &mut Assists, ctx: &AssistContext<'_>) 
         .filter_map(|u| {
             // Find any uses trees that are unused
 
-            let use_module = ctx.sema.scope(&u.syntax()).map(|s| s.module())?;
+            let use_module = ctx.sema.scope(u.syntax()).map(|s| s.module())?;
             let scope = match search_scopes.entry(use_module) {
                 Entry::Occupied(o) => o.into_mut(),
                 Entry::Vacant(v) => v.insert(module_search_scope(ctx.db(), use_module)),
@@ -101,22 +103,20 @@ pub(crate) fn remove_unused_imports(acc: &mut Assists, ctx: &AssistContext<'_>) 
                         hir::ScopeDef::ModuleDef(d) => Some(Definition::from(*d)),
                         _ => None,
                     })
-                    .any(|d| used_once_in_scope(ctx, d, scope))
+                    .any(|d| used_once_in_scope(ctx, d, u.rename(), scope))
                 {
                     return Some(u);
                 }
             } else if let Definition::Trait(ref t) = def {
                 // If the trait or any item is used.
-                if !std::iter::once(def)
-                    .chain(t.items(ctx.db()).into_iter().map(Definition::from))
-                    .any(|d| used_once_in_scope(ctx, d, scope))
+                if !std::iter::once((def, u.rename()))
+                    .chain(t.items(ctx.db()).into_iter().map(|item| (item.into(), None)))
+                    .any(|(d, rename)| used_once_in_scope(ctx, d, rename, scope))
                 {
                     return Some(u);
                 }
-            } else {
-                if !used_once_in_scope(ctx, def, &scope) {
-                    return Some(u);
-                }
+            } else if !used_once_in_scope(ctx, def, u.rename(), scope) {
+                return Some(u);
             }
 
             None
@@ -141,20 +141,28 @@ pub(crate) fn remove_unused_imports(acc: &mut Assists, ctx: &AssistContext<'_>) 
     }
 }
 
-fn used_once_in_scope(ctx: &AssistContext<'_>, def: Definition, scopes: &Vec<SearchScope>) -> bool {
+fn used_once_in_scope(
+    ctx: &AssistContext<'_>,
+    def: Definition,
+    rename: Option<Rename>,
+    scopes: &Vec<SearchScope>,
+) -> bool {
     let mut found = false;
 
     for scope in scopes {
         let mut search_non_import = |_, r: FileReference| {
             // The import itself is a use; we must skip that.
-            if r.category != Some(ReferenceCategory::Import) {
+            if !r.category.contains(ReferenceCategory::IMPORT) {
                 found = true;
                 true
             } else {
                 false
             }
         };
-        def.usages(&ctx.sema).in_scope(scope).search(&mut search_non_import);
+        def.usages(&ctx.sema)
+            .in_scope(scope)
+            .with_rename(rename.as_ref())
+            .search(&mut search_non_import);
         if found {
             break;
         }
@@ -167,7 +175,7 @@ fn used_once_in_scope(ctx: &AssistContext<'_>, def: Definition, scopes: &Vec<Sea
 fn module_search_scope(db: &RootDatabase, module: hir::Module) -> Vec<SearchScope> {
     let (file_id, range) = {
         let InFile { file_id, value } = module.definition_source(db);
-        if let Some((file_id, call_source)) = file_id.original_call_node(db) {
+        if let Some(InRealFile { file_id, value: call_source }) = file_id.original_call_node(db) {
             (file_id, Some(call_source.text_range()))
         } else {
             (
@@ -208,7 +216,7 @@ fn module_search_scope(db: &RootDatabase, module: hir::Module) -> Vec<SearchScop
             };
             let mut new_ranges = Vec::new();
             for old_range in ranges.iter_mut() {
-                let split = split_at_subrange(old_range.clone(), rng);
+                let split = split_at_subrange(*old_range, rng);
                 *old_range = split.0;
                 new_ranges.extend(split.1);
             }
@@ -333,7 +341,7 @@ fn w() {
     }
 
     #[test]
-    fn ranamed_trait_item_use_is_use() {
+    fn renamed_trait_item_use_is_use() {
         check_assist_not_applicable(
             remove_unused_imports,
             r#"
@@ -359,7 +367,7 @@ fn w() {
     }
 
     #[test]
-    fn ranamed_underscore_trait_item_use_is_use() {
+    fn renamed_underscore_trait_item_use_is_use() {
         check_assist_not_applicable(
             remove_unused_imports,
             r#"
@@ -423,7 +431,7 @@ mod z {
 struct X();
 struct Y();
 mod z {
-    use super::{X};
+    use super::X;
 
     fn w() {
         let x = X();
@@ -495,7 +503,7 @@ struct X();
 mod y {
     struct Y();
     mod z {
-        use crate::{X};
+        use crate::X;
         fn f() {
             let x = X();
         }
@@ -526,11 +534,189 @@ struct X();
 mod y {
     struct Y();
     mod z {
-        use crate::{y::Y};
+        use crate::y::Y;
         fn f() {
             let y = Y();
         }
     }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn remove_unused_auto_remove_brace_nested() {
+        check_assist(
+            remove_unused_imports,
+            r#"
+mod a {
+    pub struct A();
+}
+mod b {
+    struct F();
+    mod c {
+        $0use {{super::{{
+            {d::{{{{{{{S, U}}}}}}}},
+            {{{{e::{H, L, {{{R}}}}}}}},
+            F, super::a::A
+        }}}};$0
+        fn f() {
+            let f = F();
+            let l = L();
+            let a = A();
+            let s = S();
+            let h = H();
+        }
+    }
+
+    mod d {
+        pub struct S();
+        pub struct U();
+    }
+
+    mod e {
+        pub struct H();
+        pub struct L();
+        pub struct R();
+    }
+}
+"#,
+            r#"
+mod a {
+    pub struct A();
+}
+mod b {
+    struct F();
+    mod c {
+        use super::{
+            d::S,
+            e::{H, L},
+            F, super::a::A
+        };
+        fn f() {
+            let f = F();
+            let l = L();
+            let a = A();
+            let s = S();
+            let h = H();
+        }
+    }
+
+    mod d {
+        pub struct S();
+        pub struct U();
+    }
+
+    mod e {
+        pub struct H();
+        pub struct L();
+        pub struct R();
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn remove_comma_after_auto_remove_brace() {
+        check_assist(
+            remove_unused_imports,
+            r#"
+mod m {
+    pub mod x {
+        pub struct A;
+        pub struct B;
+    }
+    pub mod y {
+        pub struct C;
+    }
+}
+
+$0use m::{
+    x::{A, B},
+    y::C,
+};$0
+
+fn main() {
+    B;
+}
+"#,
+            r#"
+mod m {
+    pub mod x {
+        pub struct A;
+        pub struct B;
+    }
+    pub mod y {
+        pub struct C;
+    }
+}
+
+use m::
+    x::B
+;
+
+fn main() {
+    B;
+}
+"#,
+        );
+        check_assist(
+            remove_unused_imports,
+            r#"
+mod m {
+    pub mod x {
+        pub struct A;
+        pub struct B;
+    }
+    pub mod y {
+        pub struct C;
+        pub struct D;
+    }
+    pub mod z {
+        pub struct E;
+        pub struct F;
+    }
+}
+
+$0use m::{
+    x::{A, B},
+    y::{C, D,},
+    z::{E, F},
+};$0
+
+fn main() {
+    B;
+    C;
+    F;
+}
+"#,
+            r#"
+mod m {
+    pub mod x {
+        pub struct A;
+        pub struct B;
+    }
+    pub mod y {
+        pub struct C;
+        pub struct D;
+    }
+    pub mod z {
+        pub struct E;
+        pub struct F;
+    }
+}
+
+use m::{
+    x::B,
+    y::C,
+    z::F,
+};
+
+fn main() {
+    B;
+    C;
+    F;
 }
 "#,
         );
@@ -595,6 +781,40 @@ mod z {
 struct X();
 struct Y();
 mod z {
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn remove_unused_fixes_nested_self() {
+        check_assist(
+            remove_unused_imports,
+            r#"
+mod inner {
+    pub struct X();
+    pub struct Y();
+}
+
+mod z {
+    use super::inner::{self, X}$0;
+
+    fn f() {
+        let y = inner::Y();
+    }
+}
+"#,
+            r#"mod inner {
+    pub struct X();
+    pub struct Y();
+}
+
+mod z {
+    use super::inner::{self};
+
+    fn f() {
+        let y = inner::Y();
+    }
 }
 "#,
         );
@@ -732,6 +952,62 @@ pub struct X();
 
 mod z {
     mod foo;
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn use_as_alias() {
+        check_assist_not_applicable(
+            remove_unused_imports,
+            r#"
+mod foo {
+    pub struct Foo {}
+}
+
+use foo::Foo as Bar$0;
+
+fn test(_: Bar) {}
+"#,
+        );
+
+        check_assist(
+            remove_unused_imports,
+            r#"
+mod foo {
+    pub struct Foo {}
+    pub struct Bar {}
+    pub struct Qux {}
+    pub trait Quux {
+        fn quxx(&self) {}
+    }
+    impl<T> Quxx for T {}
+}
+
+use foo::{Foo as Bar, Bar as Baz, Qux as _, Quxx as _}$0;
+
+fn test(_: Bar) {
+    let a = ();
+    a.quxx();
+}
+"#,
+            r#"
+mod foo {
+    pub struct Foo {}
+    pub struct Bar {}
+    pub struct Qux {}
+    pub trait Quux {
+        fn quxx(&self) {}
+    }
+    impl<T> Quxx for T {}
+}
+
+use foo::{Foo as Bar, Quxx as _};
+
+fn test(_: Bar) {
+    let a = ();
+    a.quxx();
 }
 "#,
         );

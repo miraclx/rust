@@ -1,6 +1,6 @@
-// check-pass
-// run-rustfix
+//@ check-pass
 
+#![feature(rustc_attrs)]
 #![allow(unused)]
 
 use std::borrow::Borrow;
@@ -48,4 +48,16 @@ fn generic<T>(non_clone_type: &PlainType<T>) {
 fn non_generic(non_clone_type: &PlainType<u32>) {
     non_clone_type.clone();
     //~^ WARN call to `.clone()` on a reference in this situation does nothing
+}
+
+struct DiagnosticClone;
+impl Clone for DiagnosticClone {
+    #[rustc_diagnostic_item = "other_clone"]
+    fn clone(&self) -> Self {
+        DiagnosticClone
+    }
+}
+
+fn with_other_diagnostic_item(x: DiagnosticClone) {
+    x.clone();
 }

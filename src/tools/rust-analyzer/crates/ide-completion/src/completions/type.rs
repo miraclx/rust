@@ -15,7 +15,7 @@ pub(crate) fn complete_type_path(
     path_ctx @ PathCompletionCtx { qualified, .. }: &PathCompletionCtx,
     location: &TypeLocation,
 ) {
-    let _p = profile::span("complete_type_path");
+    let _p = tracing::info_span!("complete_type_path").entered();
 
     let scope_def_applicable = |def| {
         use hir::{GenericParam::*, ModuleDef::*};
@@ -31,6 +31,11 @@ pub(crate) fn complete_type_path(
             ScopeDef::ImplSelfType(_) => location.complete_self_type(),
             // Don't suggest attribute macros and derives.
             ScopeDef::ModuleDef(Macro(mac)) => mac.is_fn_like(ctx.db),
+            ScopeDef::ModuleDef(Trait(_) | Module(_))
+                if matches!(location, TypeLocation::ImplTrait) =>
+            {
+                true
+            }
             // Type things are fine
             ScopeDef::ModuleDef(
                 BuiltinType(_) | Adt(_) | Module(_) | Trait(_) | TraitAlias(_) | TypeAlias(_),
@@ -184,6 +189,21 @@ pub(crate) fn complete_type_path(
                         }
                     }
                 }
+                TypeLocation::ImplTrait => {
+                    acc.add_nameref_keywords_with_colon(ctx);
+                    ctx.process_all_names(&mut |name, def, doc_aliases| {
+                        let is_trait_or_module = matches!(
+                            def,
+                            ScopeDef::ModuleDef(
+                                hir::ModuleDef::Module(_) | hir::ModuleDef::Trait(_)
+                            )
+                        );
+                        if is_trait_or_module {
+                            acc.add_path_resolution(ctx, path_ctx, name, def, doc_aliases);
+                        }
+                    });
+                    return;
+                }
                 _ => {}
             };
 
@@ -206,7 +226,7 @@ pub(crate) fn complete_ascribed_type(
     if !path_ctx.is_trivial_path() {
         return None;
     }
-    let x = match ascription {
+    let ty = match ascription {
         TypeAscriptionTarget::Let(pat) | TypeAscriptionTarget::FnParam(pat) => {
             ctx.sema.type_of_pat(pat.as_ref()?)
         }
@@ -215,7 +235,9 @@ pub(crate) fn complete_ascribed_type(
         }
     }?
     .adjusted();
-    let ty_string = x.display_source_code(ctx.db, ctx.module.into(), true).ok()?;
-    acc.add(render_type_inference(ty_string, ctx));
+    if !ty.is_unknown() {
+        let ty_string = ty.display_source_code(ctx.db, ctx.module.into(), true).ok()?;
+        acc.add(render_type_inference(ty_string, ctx));
+    }
     None
 }

@@ -1,11 +1,6 @@
-use core::cmp::PartialEq;
-use core::convert::{TryFrom, TryInto};
 use core::fmt::Debug;
-use core::marker::Copy;
-use core::num::{can_not_overflow, IntErrorKind, ParseIntError, TryFromIntError};
+use core::num::{IntErrorKind, ParseIntError, TryFromIntError, can_not_overflow};
 use core::ops::{Add, Div, Mul, Rem, Sub};
-use core::option::Option;
-use core::option::Option::None;
 use core::str::FromStr;
 
 #[macro_use]
@@ -32,9 +27,12 @@ mod const_from;
 mod dec2flt;
 mod flt2dec;
 mod int_log;
+mod int_sqrt;
+mod midpoint;
 mod ops;
 mod wrapping;
 
+mod float_iter_sum_identity;
 mod ieee754;
 mod nan;
 
@@ -182,7 +180,7 @@ fn test_can_not_overflow() {
 
     // Check u128 separately:
     for base in 2..=36 {
-        let num = u128::MAX as u128;
+        let num = <u128>::MAX;
         let max_len_string = format_radix(num, base as u128);
         // base 16 fits perfectly for u128 and won't overflow:
         assert_eq!(can_overflow::<u128>(base, &max_len_string), base != 16);
@@ -218,6 +216,16 @@ fn test_infallible_try_from_int_error() {
 
     assert!(func(0).is_ok());
 }
+
+const _TEST_CONST_PARSE: () = {
+    let Ok(-0x8000) = i16::from_str_radix("-8000", 16) else { panic!() };
+    let Ok(12345) = u64::from_str_radix("12345", 10) else { panic!() };
+    if let Err(e) = i8::from_str_radix("+", 10) {
+        let IntErrorKind::InvalidDigit = e.kind() else { panic!() };
+    } else {
+        panic!()
+    }
+};
 
 macro_rules! test_impl_from {
     ($fn_name:ident, bool, $target: ty) => {
@@ -724,7 +732,7 @@ assume_usize_width! {
 }
 
 macro_rules! test_float {
-    ($modname: ident, $fty: ty, $inf: expr, $neginf: expr, $nan: expr, $min: expr, $max: expr, $min_pos: expr) => {
+    ($modname: ident, $fty: ty, $inf: expr, $neginf: expr, $nan: expr, $min: expr, $max: expr, $min_pos: expr, $max_exp:expr) => {
         mod $modname {
             #[test]
             fn min() {
@@ -875,6 +883,27 @@ macro_rules! test_float {
                 assert!(($nan as $fty).midpoint(1.0).is_nan());
                 assert!((1.0 as $fty).midpoint($nan).is_nan());
                 assert!(($nan as $fty).midpoint($nan).is_nan());
+
+                // test if large differences in magnitude are still correctly computed.
+                // NOTE: that because of how small x and y are, x + y can never overflow
+                // so (x + y) / 2.0 is always correct
+                // in particular, `2.pow(i)` will  never be at the max exponent, so it could
+                // be safely doubled, while j is significantly smaller.
+                for i in $max_exp.saturating_sub(64)..$max_exp {
+                    for j in 0..64u8 {
+                        let large = <$fty>::from(2.0f32).powi(i);
+                        // a much smaller number, such that there is no chance of overflow to test
+                        // potential double rounding in midpoint's implementation.
+                        let small = <$fty>::from(2.0f32).powi($max_exp - 1)
+                            * <$fty>::EPSILON
+                            * <$fty>::from(j);
+
+                        let naive = (large + small) / 2.0;
+                        let midpoint = large.midpoint(small);
+
+                        assert_eq!(naive, midpoint);
+                    }
+                }
             }
             #[test]
             fn rem_euclid() {
@@ -907,7 +936,8 @@ test_float!(
     f32::NAN,
     f32::MIN,
     f32::MAX,
-    f32::MIN_POSITIVE
+    f32::MIN_POSITIVE,
+    f32::MAX_EXP
 );
 test_float!(
     f64,
@@ -917,5 +947,6 @@ test_float!(
     f64::NAN,
     f64::MIN,
     f64::MAX,
-    f64::MIN_POSITIVE
+    f64::MIN_POSITIVE,
+    f64::MAX_EXP
 );

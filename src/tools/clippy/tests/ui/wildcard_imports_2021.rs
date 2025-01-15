@@ -64,6 +64,34 @@ mod struct_mod {
     }
 }
 
+// issue 9942
+mod underscore_mod {
+    // allow use of `deref` so that `clippy --fix` includes `Deref`.
+    #![allow(noop_method_call)]
+
+    mod exports_underscore {
+        pub use std::ops::Deref as _;
+        pub fn dummy() {}
+    }
+
+    mod exports_underscore_ish {
+        pub use std::ops::Deref as _Deref;
+        pub fn dummy() {}
+    }
+
+    fn does_not_lint() {
+        use exports_underscore::*;
+        let _ = (&0).deref();
+        dummy();
+    }
+
+    fn does_lint() {
+        use exports_underscore_ish::*;
+        let _ = (&0).deref();
+        dummy();
+    }
+}
+
 fn main() {
     foo();
     multi_foo();
@@ -171,6 +199,7 @@ mod super_imports {
         }
     }
 
+    #[cfg(test)]
     mod test_should_pass {
         use super::*;
 
@@ -179,6 +208,7 @@ mod super_imports {
         }
     }
 
+    #[cfg(test)]
     mod test_should_pass_inside_function {
         fn with_super_inside_function() {
             use super::*;
@@ -186,6 +216,7 @@ mod super_imports {
         }
     }
 
+    #[cfg(test)]
     mod test_should_pass_further_inside {
         fn insidefoo() {}
         mod inner {

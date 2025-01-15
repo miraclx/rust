@@ -14,9 +14,9 @@ pub(crate) fn complete_for_and_where(
     match keyword_item {
         Item::Impl(it) => {
             if it.for_token().is_none() && it.trait_().is_none() && it.self_ty().is_some() {
-                add_keyword("for", "for");
+                add_keyword("for", "for $0");
             }
-            add_keyword("where", "where");
+            add_keyword("where", "where $0");
         }
         Item::Enum(_)
         | Item::Fn(_)
@@ -24,7 +24,7 @@ pub(crate) fn complete_for_and_where(
         | Item::Trait(_)
         | Item::TypeAlias(_)
         | Item::Union(_) => {
-            add_keyword("where", "where");
+            add_keyword("where", "where $0");
         }
         _ => (),
     }
@@ -57,6 +57,8 @@ mod tests {
         check(
             r"fn my_fn() { unsafe $0 }",
             expect![[r#"
+                kw async
+                kw extern
                 kw fn
                 kw impl
                 kw trait
@@ -75,18 +77,20 @@ impl Future for A {}
 fn foo(a: A) { a.$0 }
 "#,
             expect![[r#"
-                kw await                  expr.await
                 me into_future() (as IntoFuture) fn(self) -> <Self as IntoFuture>::IntoFuture
-                sn box                    Box::new(expr)
-                sn call                   function(expr)
-                sn dbg                    dbg!(expr)
-                sn dbgr                   dbg!(&expr)
-                sn let                    let
-                sn letm                   let mut
-                sn match                  match expr {}
-                sn ref                    &expr
-                sn refm                   &mut expr
-                sn unsafe                 unsafe {}
+                kw await                                                           expr.await
+                sn box                                                         Box::new(expr)
+                sn call                                                        function(expr)
+                sn dbg                                                             dbg!(expr)
+                sn dbgr                                                           dbg!(&expr)
+                sn deref                                                                *expr
+                sn let                                                                    let
+                sn letm                                                               let mut
+                sn match                                                        match expr {}
+                sn ref                                                                  &expr
+                sn refm                                                             &mut expr
+                sn return                                                         return expr
+                sn unsafe                                                           unsafe {}
             "#]],
         );
 
@@ -100,18 +104,20 @@ fn foo() {
 }
 "#,
             expect![[r#"
-                kw await                  expr.await
                 me into_future() (use core::future::IntoFuture) fn(self) -> <Self as IntoFuture>::IntoFuture
-                sn box                    Box::new(expr)
-                sn call                   function(expr)
-                sn dbg                    dbg!(expr)
-                sn dbgr                   dbg!(&expr)
-                sn let                    let
-                sn letm                   let mut
-                sn match                  match expr {}
-                sn ref                    &expr
-                sn refm                   &mut expr
-                sn unsafe                 unsafe {}
+                kw await                                                                          expr.await
+                sn box                                                                        Box::new(expr)
+                sn call                                                                       function(expr)
+                sn dbg                                                                            dbg!(expr)
+                sn dbgr                                                                          dbg!(&expr)
+                sn deref                                                                               *expr
+                sn let                                                                                   let
+                sn letm                                                                              let mut
+                sn match                                                                       match expr {}
+                sn ref                                                                                 &expr
+                sn refm                                                                            &mut expr
+                sn return                                                                        return expr
+                sn unsafe                                                                          unsafe {}
             "#]],
         );
     }
@@ -127,19 +133,83 @@ impl IntoFuture for A {}
 fn foo(a: A) { a.$0 }
 "#,
             expect![[r#"
-                kw await                  expr.await
                 me into_future() (as IntoFuture) fn(self) -> <Self as IntoFuture>::IntoFuture
-                sn box                    Box::new(expr)
-                sn call                   function(expr)
-                sn dbg                    dbg!(expr)
-                sn dbgr                   dbg!(&expr)
-                sn let                    let
-                sn letm                   let mut
-                sn match                  match expr {}
-                sn ref                    &expr
-                sn refm                   &mut expr
-                sn unsafe                 unsafe {}
+                kw await                                                           expr.await
+                sn box                                                         Box::new(expr)
+                sn call                                                        function(expr)
+                sn dbg                                                             dbg!(expr)
+                sn dbgr                                                           dbg!(&expr)
+                sn deref                                                                *expr
+                sn let                                                                    let
+                sn letm                                                               let mut
+                sn match                                                        match expr {}
+                sn ref                                                                  &expr
+                sn refm                                                             &mut expr
+                sn return                                                         return expr
+                sn unsafe                                                           unsafe {}
             "#]],
+        );
+    }
+
+    #[test]
+    fn for_in_impl() {
+        check_edit(
+            "for",
+            r#"
+struct X;
+impl X $0 {}
+"#,
+            r#"
+struct X;
+impl X for $0 {}
+"#,
+        );
+        check_edit(
+            "for",
+            r#"
+fn foo() {
+    struct X;
+    impl X $0 {}
+}
+"#,
+            r#"
+fn foo() {
+    struct X;
+    impl X for $0 {}
+}
+"#,
+        );
+        check_edit(
+            "for",
+            r#"
+fn foo() {
+    struct X;
+    impl X $0
+}
+"#,
+            r#"
+fn foo() {
+    struct X;
+    impl X for $0
+}
+"#,
+        );
+        check_edit(
+            "for",
+            r#"
+fn foo() {
+    struct X;
+    impl X { fn bar() { $0 } }
+}
+"#,
+            r#"
+fn foo() {
+    struct X;
+    impl X { fn bar() { for $1 in $2 {
+    $0
+} } }
+}
+"#,
         );
     }
 

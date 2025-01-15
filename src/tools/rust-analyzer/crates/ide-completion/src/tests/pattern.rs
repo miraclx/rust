@@ -122,15 +122,15 @@ fn foo() {
         expect![[r#"
             ct CONST
             en Enum
-            ma makro!(…)  macro_rules! makro
+            ma makro!(…)    macro_rules! makro
             md module
             st Record
             st Tuple
             st Unit
             ev TupleV
             bn Record {…} Record { field$1 }$0
-            bn Tuple(…)   Tuple($1)$0
-            bn TupleV(…)  TupleV($1)$0
+            bn Tuple(…)            Tuple($1)$0
+            bn TupleV(…)          TupleV($1)$0
             kw mut
             kw ref
         "#]],
@@ -146,20 +146,20 @@ enum SingleVariantEnum {
 }
 use SingleVariantEnum::Variant;
 fn foo() {
-   let a$0
+   for a$0
 }
 "#,
         expect![[r#"
             en SingleVariantEnum
-            ma makro!(…)         macro_rules! makro
+            ma makro!(…)    macro_rules! makro
             md module
             st Record
             st Tuple
             st Unit
             ev Variant
-            bn Record {…}        Record { field$1 }$0
-            bn Tuple(…)          Tuple($1)$0
-            bn Variant           Variant$0
+            bn Record {…} Record { field$1 }$0
+            bn Tuple(…)            Tuple($1)$0
+            bn Variant               Variant$0
             kw mut
             kw ref
         "#]],
@@ -174,13 +174,13 @@ fn foo(a$0) {
 }
 "#,
         expect![[r#"
-            ma makro!(…)  macro_rules! makro
+            ma makro!(…)            macro_rules! makro
             md module
             st Record
             st Tuple
             st Unit
             bn Record {…} Record { field$1 }: Record$0
-            bn Tuple(…)   Tuple($1): Tuple$0
+            bn Tuple(…)             Tuple($1): Tuple$0
             kw mut
             kw ref
         "#]],
@@ -191,13 +191,14 @@ fn foo(a$0: Tuple) {
 }
 "#,
         expect![[r#"
-            ma makro!(…)  macro_rules! makro
+            ma makro!(…)    macro_rules! makro
             md module
             st Record
             st Tuple
             st Unit
             bn Record {…} Record { field$1 }$0
-            bn Tuple(…)   Tuple($1)$0
+            bn Tuple(…)            Tuple($1)$0
+            bn tuple
             kw mut
             kw ref
         "#]],
@@ -239,7 +240,7 @@ fn foo() {
         expect![[r#"
             en E
             ma m!(…) macro_rules! m
-            bn E::X  E::X$0
+            bn E::X          E::X$0
             kw mut
             kw ref
         "#]],
@@ -267,7 +268,7 @@ fn outer() {
             st Record
             st Tuple
             bn Record {…} Record { field$1, .. }$0
-            bn Tuple(…)   Tuple($1, ..)$0
+            bn Tuple(…)            Tuple($1, ..)$0
             kw mut
             kw ref
         "#]],
@@ -290,7 +291,7 @@ impl Foo {
         expect![[r#"
             sp Self
             st Foo
-            bn Foo(…)  Foo($1)$0
+            bn Foo(…)   Foo($1)$0
             bn Self(…) Self($1)$0
             kw mut
             kw ref
@@ -314,8 +315,8 @@ fn func() {
         expect![[r#"
             ct ASSOC_CONST const ASSOC_CONST: ()
             bn RecordV {…} RecordV { field$1 }$0
-            bn TupleV(…)   TupleV($1)$0
-            bn UnitV       UnitV$0
+            bn TupleV(…)            TupleV($1)$0
+            bn UnitV                     UnitV$0
         "#]],
     );
 }
@@ -331,7 +332,7 @@ fn outer(Foo { bar: $0 }: Foo) {}
         expect![[r#"
             st Bar
             st Foo
-            bn Bar(…)  Bar($1)$0
+            bn Bar(…)        Bar($1)$0
             bn Foo {…} Foo { bar$1 }$0
             kw mut
             kw ref
@@ -355,6 +356,35 @@ fn outer(Foo { bar$0 }: Foo) {}
 }
 
 #[test]
+fn completes_in_record_field_pat_with_generic_type_alias() {
+    check_empty(
+        r#"
+type Wrap<T> = T;
+
+enum X {
+    A { cool: u32, stuff: u32 },
+    B,
+}
+
+fn main() {
+    let wrapped = Wrap::<X>::A {
+        cool: 100,
+        stuff: 100,
+    };
+
+    if let Wrap::<X>::A { $0 } = &wrapped {};
+}
+"#,
+        expect![[r#"
+            fd cool  u32
+            fd stuff u32
+            kw mut
+            kw ref
+        "#]],
+    )
+}
+
+#[test]
 fn completes_in_fn_param() {
     check_empty(
         r#"
@@ -365,7 +395,7 @@ fn foo($0) {}
         expect![[r#"
             st Bar
             st Foo
-            bn Bar(…)  Bar($1): Bar$0
+            bn Bar(…)        Bar($1): Bar$0
             bn Foo {…} Foo { bar$1 }: Foo$0
             kw mut
             kw ref
@@ -386,7 +416,7 @@ fn foo() {
         expect![[r#"
             st Bar
             st Foo
-            bn Bar(…)  Bar($1)$0
+            bn Bar(…)        Bar($1)$0
             bn Foo {…} Foo { bar$1 }$0
             kw mut
             kw ref
@@ -406,7 +436,7 @@ fn foo() {
 }
 "#,
         expect![[r#"
-            st Bar
+            st Bar Bar
             kw crate::
             kw self::
         "#]],
@@ -421,7 +451,7 @@ fn foo() {
 }
 "#,
         expect![[r#"
-            st Foo
+            st Foo Foo
             kw crate::
             kw self::
         "#]],
@@ -505,10 +535,10 @@ fn foo() {
 "#,
         expect![[r#"
             en Enum
-            bn Enum::A          Enum::A$0
-            bn Enum::B {…}      Enum::B { r#type$1 }$0
+            bn Enum::A                              Enum::A$0
+            bn Enum::B {…}             Enum::B { r#type$1 }$0
             bn Enum::struct {…} Enum::r#struct { r#type$1 }$0
-            bn Enum::type       Enum::r#type$0
+            bn Enum::type                      Enum::r#type$0
             kw mut
             kw ref
         "#]],
@@ -529,10 +559,10 @@ fn foo() {
 }
 "#,
         expect![[r#"
-            bn A          A$0
-            bn B {…}      B { r#type$1 }$0
+            bn A                              A$0
+            bn B {…}             B { r#type$1 }$0
             bn struct {…} r#struct { r#type$1 }$0
-            bn type       r#type$0
+            bn type                      r#type$0
         "#]],
     );
 }
@@ -642,8 +672,8 @@ impl Ty {
             st Ty
             bn &mut self
             bn &self
-            bn Self(…)   Self($1): Self$0
-            bn Ty(…)     Ty($1): Ty$0
+            bn Self(…) Self($1): Self$0
+            bn Ty(…)       Ty($1): Ty$0
             bn mut self
             bn self
             kw mut
@@ -663,8 +693,8 @@ impl Ty {
             st Ty
             bn &mut self
             bn &self
-            bn Self(…)   Self($1): Self$0
-            bn Ty(…)     Ty($1): Ty$0
+            bn Self(…) Self($1): Self$0
+            bn Ty(…)       Ty($1): Ty$0
             bn mut self
             bn self
             kw mut
@@ -684,8 +714,8 @@ impl Ty {
             st Ty
             bn &mut self
             bn &self
-            bn Self(…)   Self($1): Self$0
-            bn Ty(…)     Ty($1): Ty$0
+            bn Self(…) Self($1): Self$0
+            bn Ty(…)       Ty($1): Ty$0
             bn mut self
             bn self
             kw mut
@@ -704,7 +734,7 @@ impl Ty {
             sp Self
             st Ty
             bn Self(…) Self($1): Self$0
-            bn Ty(…)   Ty($1): Ty$0
+            bn Ty(…)       Ty($1): Ty$0
             kw mut
             kw ref
         "#]],
@@ -733,7 +763,7 @@ fn f(x: EnumAlias<u8>) {
 "#,
         expect![[r#"
             bn Tuple(…) Tuple($1)$0
-            bn Unit     Unit$0
+            bn Unit          Unit$0
         "#]],
     );
 }
@@ -787,6 +817,127 @@ pub enum Enum {
             st S
             kw mut
             kw ref
+        "#]],
+    );
+}
+
+#[test]
+fn add_space_after_mut_ref_kw() {
+    check_edit(
+        "mut",
+        r#"
+fn foo() {
+    let $0
+}
+"#,
+        r#"
+fn foo() {
+    let mut $0
+}
+"#,
+    );
+
+    check_edit(
+        "ref",
+        r#"
+fn foo() {
+    let $0
+}
+"#,
+        r#"
+fn foo() {
+    let ref $0
+}
+"#,
+    );
+}
+
+#[test]
+fn suggest_name_for_pattern() {
+    check_edit(
+        "s1",
+        r#"
+struct S1;
+
+fn foo() {
+    let $0 = S1;
+}
+"#,
+        r#"
+struct S1;
+
+fn foo() {
+    let s1 = S1;
+}
+"#,
+    );
+
+    check_edit(
+        "s1",
+        r#"
+struct S1;
+
+fn foo(s$0: S1) {
+}
+"#,
+        r#"
+struct S1;
+
+fn foo(s1: S1) {
+}
+"#,
+    );
+
+    // Tests for &adt
+    check_edit(
+        "s1",
+        r#"
+struct S1;
+
+fn foo() {
+    let $0 = &S1;
+}
+"#,
+        r#"
+struct S1;
+
+fn foo() {
+    let s1 = &S1;
+}
+"#,
+    );
+
+    // Do not suggest reserved keywords
+    check_empty(
+        r#"
+struct Struct;
+
+fn foo() {
+    let $0 = Struct;
+}
+"#,
+        expect![[r#"
+            st Struct
+            kw mut
+            kw ref
+        "#]],
+    );
+}
+
+#[test]
+fn private_item_in_module_in_function_body() {
+    check_empty(
+        r#"
+fn main() {
+    mod foo {
+        struct Private;
+        pub struct Public;
+    }
+    foo::$0
+}
+"#,
+        expect![[r#"
+            st Public Public
         "#]],
     );
 }

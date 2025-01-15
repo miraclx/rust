@@ -3,9 +3,10 @@
 // of terminologies might not be relevant in the context of Clippy. Note that its behavior might
 // differ from the time of `rustc` even if the name stays the same.
 
-use crate::msrvs::Msrv;
+use crate::msrvs::{self, Msrv};
 use hir::LangItem;
-use rustc_const_eval::transform::check_consts::ConstCx;
+use rustc_attr_parsing::{RustcVersion, StableSince};
+use rustc_const_eval::check_consts::ConstCx;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_infer::infer::TyCtxtInferExt;
@@ -17,9 +18,8 @@ use rustc_middle::mir::{
 use rustc_middle::traits::{BuiltinImplSource, ImplSource, ObligationCause};
 use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::{self, GenericArgKind, TraitRef, Ty, TyCtxt};
-use rustc_semver::RustcVersion;
-use rustc_span::symbol::sym;
 use rustc_span::Span;
+use rustc_span::symbol::sym;
 use rustc_trait_selection::traits::{ObligationCtxt, SelectionContext};
 use std::borrow::Cow;
 
@@ -39,9 +39,13 @@ pub fn is_min_const_fn<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, msrv: &Msrv) 
     )?;
 
     for bb in &*body.basic_blocks {
-        check_terminator(tcx, body, bb.terminator(), msrv)?;
-        for stmt in &bb.statements {
-            check_statement(tcx, body, def_id, stmt)?;
+        // Cleanup blocks are ignored entirely by const eval, so we can too:
+        // https://github.com/rust-lang/rust/blob/1dea922ea6e74f99a0e97de5cdb8174e4dea0444/compiler/rustc_const_eval/src/transform/check_consts/check.rs#L382
+        if !bb.is_cleanup {
+            check_terminator(tcx, body, bb.terminator(), msrv)?;
+            for stmt in &bb.statements {
+                check_statement(tcx, body, def_id, stmt, msrv)?;
+            }
         }
     }
     Ok(())
@@ -101,46 +105,46 @@ fn check_rvalue<'tcx>(
     def_id: DefId,
     rvalue: &Rvalue<'tcx>,
     span: Span,
+    msrv: &Msrv,
 ) -> McfResult {
     match rvalue {
         Rvalue::ThreadLocalRef(_) => Err((span, "cannot access thread local storage in const fn".into())),
-        Rvalue::Len(place) | Rvalue::Discriminant(place) | Rvalue::Ref(_, _, place) | Rvalue::AddressOf(_, place) => {
-            check_place(tcx, *place, span, body)
+        Rvalue::Discriminant(place) | Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) => {
+            check_place(tcx, *place, span, body, msrv)
         },
-        Rvalue::CopyForDeref(place) => check_place(tcx, *place, span, body),
+        Rvalue::CopyForDeref(place) => check_place(tcx, *place, span, body, msrv),
         Rvalue::Repeat(operand, _)
         | Rvalue::Use(operand)
         | Rvalue::Cast(
-            CastKind::PointerFromExposedAddress
+            CastKind::PointerWithExposedProvenance
             | CastKind::IntToInt
             | CastKind::FloatToInt
             | CastKind::IntToFloat
             | CastKind::FloatToFloat
             | CastKind::FnPtrToPtr
             | CastKind::PtrToPtr
-            | CastKind::PointerCoercion(PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer),
+            | CastKind::PointerCoercion(PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer, _),
             operand,
             _,
-        ) => check_operand(tcx, operand, span, body),
+        ) => check_operand(tcx, operand, span, body, msrv),
         Rvalue::Cast(
             CastKind::PointerCoercion(
                 PointerCoercion::UnsafeFnPointer
                 | PointerCoercion::ClosureFnPointer(_)
                 | PointerCoercion::ReifyFnPointer,
+                _,
             ),
             _,
             _,
         ) => Err((span, "function pointer casts are not allowed in const fn".into())),
-        Rvalue::Cast(CastKind::PointerCoercion(PointerCoercion::Unsize), op, cast_ty) => {
-            let pointee_ty = if let Some(deref_ty) = cast_ty.builtin_deref(true) {
-                deref_ty.ty
-            } else {
+        Rvalue::Cast(CastKind::PointerCoercion(PointerCoercion::Unsize, _), op, cast_ty) => {
+            let Some(pointee_ty) = cast_ty.builtin_deref(true) else {
                 // We cannot allow this for now.
                 return Err((span, "unsizing casts are only allowed for references right now".into()));
             };
-            let unsized_ty = tcx.struct_tail_erasing_lifetimes(pointee_ty, tcx.param_env(def_id));
+            let unsized_ty = tcx.struct_tail_for_codegen(pointee_ty, ty::TypingEnv::post_analysis(tcx, def_id));
             if let ty::Slice(_) | ty::Str = unsized_ty.kind() {
-                check_operand(tcx, op, span, body)?;
+                check_operand(tcx, op, span, body, msrv)?;
                 // Casting/coercing things to slices is fine.
                 Ok(())
             } else {
@@ -148,10 +152,10 @@ fn check_rvalue<'tcx>(
                 Err((span, "unsizing casts are not allowed in const fn".into()))
             }
         },
-        Rvalue::Cast(CastKind::PointerExposeAddress, _, _) => {
+        Rvalue::Cast(CastKind::PointerExposeProvenance, _, _) => {
             Err((span, "casting pointers to ints is unstable in const fn".into()))
         },
-        Rvalue::Cast(CastKind::DynStar, _, _) => {
+        Rvalue::Cast(CastKind::PointerCoercion(PointerCoercion::DynStar, _), _, _) => {
             // FIXME(dyn-star)
             unimplemented!()
         },
@@ -160,9 +164,9 @@ fn check_rvalue<'tcx>(
             "transmute can attempt to turn pointers into integers, so is unstable in const fn".into(),
         )),
         // binops are fine on integers
-        Rvalue::BinaryOp(_, box (lhs, rhs)) | Rvalue::CheckedBinaryOp(_, box (lhs, rhs)) => {
-            check_operand(tcx, lhs, span, body)?;
-            check_operand(tcx, rhs, span, body)?;
+        Rvalue::BinaryOp(_, box (lhs, rhs)) => {
+            check_operand(tcx, lhs, span, body, msrv)?;
+            check_operand(tcx, rhs, span, body, msrv)?;
             let ty = lhs.ty(body, tcx);
             if ty.is_integral() || ty.is_bool() || ty.is_char() {
                 Ok(())
@@ -173,20 +177,19 @@ fn check_rvalue<'tcx>(
                 ))
             }
         },
-        Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf | NullOp::OffsetOf(_), _) | Rvalue::ShallowInitBox(_, _) => {
-            Ok(())
-        },
+        Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf | NullOp::OffsetOf(_) | NullOp::UbChecks, _)
+        | Rvalue::ShallowInitBox(_, _) => Ok(()),
         Rvalue::UnaryOp(_, operand) => {
             let ty = operand.ty(body, tcx);
             if ty.is_integral() || ty.is_bool() {
-                check_operand(tcx, operand, span, body)
+                check_operand(tcx, operand, span, body, msrv)
             } else {
                 Err((span, "only int and `bool` operations are stable in const fn".into()))
             }
         },
         Rvalue::Aggregate(_, operands) => {
             for operand in operands {
-                check_operand(tcx, operand, span, body)?;
+                check_operand(tcx, operand, span, body, msrv)?;
             }
             Ok(())
         },
@@ -198,28 +201,29 @@ fn check_statement<'tcx>(
     body: &Body<'tcx>,
     def_id: DefId,
     statement: &Statement<'tcx>,
+    msrv: &Msrv,
 ) -> McfResult {
     let span = statement.source_info.span;
     match &statement.kind {
         StatementKind::Assign(box (place, rval)) => {
-            check_place(tcx, *place, span, body)?;
-            check_rvalue(tcx, body, def_id, rval, span)
+            check_place(tcx, *place, span, body, msrv)?;
+            check_rvalue(tcx, body, def_id, rval, span, msrv)
         },
 
-        StatementKind::FakeRead(box (_, place)) => check_place(tcx, *place, span, body),
+        StatementKind::FakeRead(box (_, place)) => check_place(tcx, *place, span, body, msrv),
         // just an assignment
         StatementKind::SetDiscriminant { place, .. } | StatementKind::Deinit(place) => {
-            check_place(tcx, **place, span, body)
+            check_place(tcx, **place, span, body, msrv)
         },
 
-        StatementKind::Intrinsic(box NonDivergingIntrinsic::Assume(op)) => check_operand(tcx, op, span, body),
+        StatementKind::Intrinsic(box NonDivergingIntrinsic::Assume(op)) => check_operand(tcx, op, span, body, msrv),
 
         StatementKind::Intrinsic(box NonDivergingIntrinsic::CopyNonOverlapping(
             rustc_middle::mir::CopyNonOverlapping { dst, src, count },
         )) => {
-            check_operand(tcx, dst, span, body)?;
-            check_operand(tcx, src, span, body)?;
-            check_operand(tcx, count, span, body)
+            check_operand(tcx, dst, span, body, msrv)?;
+            check_operand(tcx, src, span, body, msrv)?;
+            check_operand(tcx, count, span, body, msrv)
         },
         // These are all NOPs
         StatementKind::StorageLive(_)
@@ -229,11 +233,18 @@ fn check_statement<'tcx>(
         | StatementKind::PlaceMention(..)
         | StatementKind::Coverage(..)
         | StatementKind::ConstEvalCounter
+        | StatementKind::BackwardIncompatibleDropHint { .. }
         | StatementKind::Nop => Ok(()),
     }
 }
 
-fn check_operand<'tcx>(tcx: TyCtxt<'tcx>, operand: &Operand<'tcx>, span: Span, body: &Body<'tcx>) -> McfResult {
+fn check_operand<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    operand: &Operand<'tcx>,
+    span: Span,
+    body: &Body<'tcx>,
+    msrv: &Msrv,
+) -> McfResult {
     match operand {
         Operand::Move(place) => {
             if !place.projection.as_ref().is_empty()
@@ -245,9 +256,9 @@ fn check_operand<'tcx>(tcx: TyCtxt<'tcx>, operand: &Operand<'tcx>, span: Span, b
                 ));
             }
 
-            check_place(tcx, *place, span, body)
+            check_place(tcx, *place, span, body, msrv)
         },
-        Operand::Copy(place) => check_place(tcx, *place, span, body),
+        Operand::Copy(place) => check_place(tcx, *place, span, body, msrv),
         Operand::Constant(c) => match c.check_static_ptr(tcx) {
             Some(_) => Err((span, "cannot access `static` items in const fn".into())),
             None => Ok(()),
@@ -255,23 +266,28 @@ fn check_operand<'tcx>(tcx: TyCtxt<'tcx>, operand: &Operand<'tcx>, span: Span, b
     }
 }
 
-fn check_place<'tcx>(tcx: TyCtxt<'tcx>, place: Place<'tcx>, span: Span, body: &Body<'tcx>) -> McfResult {
+fn check_place<'tcx>(tcx: TyCtxt<'tcx>, place: Place<'tcx>, span: Span, body: &Body<'tcx>, msrv: &Msrv) -> McfResult {
     for (base, elem) in place.as_ref().iter_projections() {
         match elem {
             ProjectionElem::Field(..) => {
-                let base_ty = base.ty(body, tcx).ty;
-                if let Some(def) = base_ty.ty_adt_def() {
-                    // No union field accesses in `const fn`
-                    if def.is_union() {
-                        return Err((span, "accessing union fields is unstable".into()));
-                    }
+                if base.ty(body, tcx).ty.is_union() && !msrv.meets(msrvs::CONST_FN_UNION) {
+                    return Err((span, "accessing union fields is unstable".into()));
                 }
+            },
+            ProjectionElem::Deref => match base.ty(body, tcx).ty.kind() {
+                ty::RawPtr(_, hir::Mutability::Mut) => {
+                    return Err((span, "dereferencing raw mut pointer in const fn is unstable".into()));
+                },
+                ty::RawPtr(_, hir::Mutability::Not) if !msrv.meets(msrvs::CONST_RAW_PTR_DEREF) => {
+                    return Err((span, "dereferencing raw const pointer in const fn is unstable".into()));
+                },
+                _ => (),
             },
             ProjectionElem::ConstantIndex { .. }
             | ProjectionElem::OpaqueCast(..)
             | ProjectionElem::Downcast(..)
             | ProjectionElem::Subslice { .. }
-            | ProjectionElem::Deref
+            | ProjectionElem::Subtype(_)
             | ProjectionElem::Index(_) => {},
         }
     }
@@ -303,9 +319,9 @@ fn check_terminator<'tcx>(
             }
             Ok(())
         },
-        TerminatorKind::SwitchInt { discr, targets: _ } => check_operand(tcx, discr, span, body),
-        TerminatorKind::GeneratorDrop | TerminatorKind::Yield { .. } => {
-            Err((span, "const fn generators are unstable".into()))
+        TerminatorKind::SwitchInt { discr, targets: _ } => check_operand(tcx, discr, span, body, msrv),
+        TerminatorKind::CoroutineDrop | TerminatorKind::Yield { .. } => {
+            Err((span, "const fn coroutines are unstable".into()))
         },
         TerminatorKind::Call {
             func,
@@ -315,10 +331,11 @@ fn check_terminator<'tcx>(
             target: _,
             unwind: _,
             fn_span: _,
-        } => {
+        }
+        | TerminatorKind::TailCall { func, args, fn_span: _ } => {
             let fn_ty = func.ty(body, tcx);
             if let ty::FnDef(fn_def_id, _) = *fn_ty.kind() {
-                if !is_const_fn(tcx, fn_def_id, msrv) {
+                if !is_stable_const_fn(tcx, fn_def_id, msrv) {
                     return Err((
                         span,
                         format!(
@@ -333,17 +350,17 @@ fn check_terminator<'tcx>(
                 // within const fns. `transmute` is allowed in all other const contexts.
                 // This won't really scale to more intrinsics or functions. Let's allow const
                 // transmutes in const fn before we add more hacks to this.
-                if tcx.is_intrinsic(fn_def_id) && tcx.item_name(fn_def_id) == sym::transmute {
+                if tcx.is_intrinsic(fn_def_id, sym::transmute) {
                     return Err((
                         span,
                         "can only call `transmute` from const items, not `const fn`".into(),
                     ));
                 }
 
-                check_operand(tcx, func, span, body)?;
+                check_operand(tcx, func, span, body, msrv)?;
 
                 for arg in args {
-                    check_operand(tcx, arg, span, body)?;
+                    check_operand(tcx, &arg.node, span, body, msrv)?;
                 }
                 Ok(())
             } else {
@@ -356,58 +373,51 @@ fn check_terminator<'tcx>(
             msg: _,
             target: _,
             unwind: _,
-        } => check_operand(tcx, cond, span, body),
+        } => check_operand(tcx, cond, span, body, msrv),
         TerminatorKind::InlineAsm { .. } => Err((span, "cannot use inline assembly in const fn".into())),
     }
 }
 
-fn is_const_fn(tcx: TyCtxt<'_>, def_id: DefId, msrv: &Msrv) -> bool {
+fn is_stable_const_fn(tcx: TyCtxt<'_>, def_id: DefId, msrv: &Msrv) -> bool {
     tcx.is_const_fn(def_id)
-        && tcx.lookup_const_stability(def_id).map_or(true, |const_stab| {
-            if let rustc_attr::StabilityLevel::Stable { since, .. } = const_stab.level {
+        && tcx.lookup_const_stability(def_id).is_none_or(|const_stab| {
+            if let rustc_attr_parsing::StabilityLevel::Stable { since, .. } = const_stab.level {
                 // Checking MSRV is manually necessary because `rustc` has no such concept. This entire
-                // function could be removed if `rustc` provided a MSRV-aware version of `is_const_fn`.
+                // function could be removed if `rustc` provided a MSRV-aware version of `is_stable_const_fn`.
                 // as a part of an unimplemented MSRV check https://github.com/rust-lang/rust/issues/65262.
 
-                // HACK(nilstrieb): CURRENT_RUSTC_VERSION can return versions like 1.66.0-dev. `rustc-semver`
-                // doesn't accept the `-dev` version number so we have to strip it off.
-                let short_version = since
-                    .as_str()
-                    .split('-')
-                    .next()
-                    .expect("rustc_attr::StabilityLevel::Stable::since` is empty");
+                let const_stab_rust_version = match since {
+                    StableSince::Version(version) => version,
+                    StableSince::Current => RustcVersion::CURRENT,
+                    StableSince::Err => return false,
+                };
 
-                let since = rustc_span::Symbol::intern(short_version);
-
-                msrv.meets(RustcVersion::parse(since.as_str()).unwrap_or_else(|err| {
-                    panic!("`rustc_attr::StabilityLevel::Stable::since` is ill-formatted: `{since}`, {err:?}")
-                }))
+                msrv.meets(const_stab_rust_version)
             } else {
-                // Unstable const fn with the feature enabled.
-                msrv.current().is_none()
+                // Unstable const fn, check if the feature is enabled.
+                tcx.features().enabled(const_stab.feature) && msrv.current().is_none()
             }
         })
 }
 
-#[expect(clippy::similar_names)] // bit too pedantic
 fn is_ty_const_destruct<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, body: &Body<'tcx>) -> bool {
-    // FIXME(effects, fee1-dead) revert to const destruct once it works again
+    // FIXME(const_trait_impl, fee1-dead) revert to const destruct once it works again
     #[expect(unused)]
     fn is_ty_const_destruct_unused<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, body: &Body<'tcx>) -> bool {
-        // Avoid selecting for simple cases, such as builtin types.
-        if ty::util::is_trivially_const_drop(ty) {
-            return true;
+        // If this doesn't need drop at all, then don't select `~const Destruct`.
+        if !ty.needs_drop(tcx, body.typing_env(tcx)) {
+            return false;
         }
 
-        // FIXME(effects) constness
+        let (infcx, param_env) = tcx.infer_ctxt().build_with_typing_env(body.typing_env(tcx));
+        // FIXME(const_trait_impl) constness
         let obligation = Obligation::new(
             tcx,
             ObligationCause::dummy_with_span(body.span),
-            ConstCx::new(tcx, body).param_env,
-            TraitRef::from_lang_item(tcx, LangItem::Destruct, body.span, [ty]),
+            param_env,
+            TraitRef::new(tcx, tcx.require_lang_item(LangItem::Destruct, Some(body.span)), [ty]),
         );
 
-        let infcx = tcx.infer_ctxt().build();
         let mut selcx = SelectionContext::new(&infcx);
         let Some(impl_src) = selcx.select(&obligation).ok().flatten() else {
             return false;
@@ -425,5 +435,5 @@ fn is_ty_const_destruct<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, body: &Body<'tcx>
         ocx.select_all_or_error().is_empty()
     }
 
-    !ty.needs_drop(tcx, ConstCx::new(tcx, body).param_env)
+    !ty.needs_drop(tcx, ConstCx::new(tcx, body).typing_env)
 }

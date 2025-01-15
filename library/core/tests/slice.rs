@@ -1,8 +1,8 @@
 use core::cell::Cell;
 use core::cmp::Ordering;
 use core::mem::MaybeUninit;
-use core::num::NonZeroUsize;
-use core::result::Result::{Err, Ok};
+use core::num::NonZero;
+use core::ops::{Range, RangeInclusive};
 use core::slice;
 
 #[test]
@@ -70,13 +70,13 @@ fn test_binary_search() {
     assert_eq!(b.binary_search(&8), Err(5));
 
     let b = [(); usize::MAX];
-    assert_eq!(b.binary_search(&()), Ok(usize::MAX / 2));
+    assert_eq!(b.binary_search(&()), Ok(usize::MAX - 1));
 }
 
 #[test]
 fn test_binary_search_by_overflow() {
     let b = [(); usize::MAX];
-    assert_eq!(b.binary_search_by(|_| Ordering::Equal), Ok(usize::MAX / 2));
+    assert_eq!(b.binary_search_by(|_| Ordering::Equal), Ok(usize::MAX - 1));
     assert_eq!(b.binary_search_by(|_| Ordering::Greater), Err(0));
     assert_eq!(b.binary_search_by(|_| Ordering::Less), Err(usize::MAX));
 }
@@ -88,13 +88,13 @@ fn test_binary_search_implementation_details() {
     let b = [1, 1, 2, 2, 3, 3, 3];
     assert_eq!(b.binary_search(&1), Ok(1));
     assert_eq!(b.binary_search(&2), Ok(3));
-    assert_eq!(b.binary_search(&3), Ok(5));
+    assert_eq!(b.binary_search(&3), Ok(6));
     let b = [1, 1, 1, 1, 1, 3, 3, 3, 3];
     assert_eq!(b.binary_search(&1), Ok(4));
-    assert_eq!(b.binary_search(&3), Ok(7));
+    assert_eq!(b.binary_search(&3), Ok(8));
     let b = [1, 1, 1, 1, 3, 3, 3, 3, 3];
-    assert_eq!(b.binary_search(&1), Ok(2));
-    assert_eq!(b.binary_search(&3), Ok(4));
+    assert_eq!(b.binary_search(&1), Ok(3));
+    assert_eq!(b.binary_search(&3), Ok(8));
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn test_iterator_advance_by() {
     }
 
     let mut iter = v.iter();
-    assert_eq!(iter.advance_by(v.len() + 1), Err(NonZeroUsize::new(1).unwrap()));
+    assert_eq!(iter.advance_by(v.len() + 1), Err(NonZero::new(1).unwrap()));
     assert_eq!(iter.as_slice(), &[]);
 
     let mut iter = v.iter();
@@ -170,7 +170,7 @@ fn test_iterator_advance_back_by() {
     }
 
     let mut iter = v.iter();
-    assert_eq!(iter.advance_back_by(v.len() + 1), Err(NonZeroUsize::new(1).unwrap()));
+    assert_eq!(iter.advance_back_by(v.len() + 1), Err(NonZero::new(1).unwrap()));
     assert_eq!(iter.as_slice(), &[]);
 
     let mut iter = v.iter();
@@ -1803,85 +1803,12 @@ fn brute_force_rotate_test_1() {
 
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
-fn sort_unstable() {
-    use core::cmp::Ordering::{Equal, Greater, Less};
-    use core::slice::heapsort;
-    use rand::{seq::SliceRandom, Rng};
-
-    // Miri is too slow (but still need to `chain` to make the types match)
-    let lens = if cfg!(miri) { (2..20).chain(0..0) } else { (2..25).chain(500..510) };
-    let rounds = if cfg!(miri) { 1 } else { 100 };
-
-    let mut v = [0; 600];
-    let mut tmp = [0; 600];
-    let mut rng = crate::test_rng();
-
-    for len in lens {
-        let v = &mut v[0..len];
-        let tmp = &mut tmp[0..len];
-
-        for &modulus in &[5, 10, 100, 1000] {
-            for _ in 0..rounds {
-                for i in 0..len {
-                    v[i] = rng.gen::<i32>() % modulus;
-                }
-
-                // Sort in default order.
-                tmp.copy_from_slice(v);
-                tmp.sort_unstable();
-                assert!(tmp.windows(2).all(|w| w[0] <= w[1]));
-
-                // Sort in ascending order.
-                tmp.copy_from_slice(v);
-                tmp.sort_unstable_by(|a, b| a.cmp(b));
-                assert!(tmp.windows(2).all(|w| w[0] <= w[1]));
-
-                // Sort in descending order.
-                tmp.copy_from_slice(v);
-                tmp.sort_unstable_by(|a, b| b.cmp(a));
-                assert!(tmp.windows(2).all(|w| w[0] >= w[1]));
-
-                // Test heapsort using `<` operator.
-                tmp.copy_from_slice(v);
-                heapsort(tmp, |a, b| a < b);
-                assert!(tmp.windows(2).all(|w| w[0] <= w[1]));
-
-                // Test heapsort using `>` operator.
-                tmp.copy_from_slice(v);
-                heapsort(tmp, |a, b| a > b);
-                assert!(tmp.windows(2).all(|w| w[0] >= w[1]));
-            }
-        }
-    }
-
-    // Sort using a completely random comparison function.
-    // This will reorder the elements *somehow*, but won't panic.
-    for i in 0..v.len() {
-        v[i] = i as i32;
-    }
-    v.sort_unstable_by(|_, _| *[Less, Equal, Greater].choose(&mut rng).unwrap());
-    v.sort_unstable();
-    for i in 0..v.len() {
-        assert_eq!(v[i], i as i32);
-    }
-
-    // Should not panic.
-    [0i32; 0].sort_unstable();
-    [(); 10].sort_unstable();
-    [(); 100].sort_unstable();
-
-    let mut v = [0xDEADBEEFu64];
-    v.sort_unstable();
-    assert!(v == [0xDEADBEEF]);
-}
-
-#[test]
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(miri, ignore)] // Miri is too slow
 fn select_nth_unstable() {
     use core::cmp::Ordering::{Equal, Greater, Less};
-    use rand::seq::SliceRandom;
+
     use rand::Rng;
+    use rand::seq::SliceRandom;
 
     let mut rng = crate::test_rng();
 
@@ -2110,9 +2037,9 @@ fn test_align_to_zst() {
 #[test]
 fn test_align_to_non_trivial() {
     #[repr(align(8))]
-    struct U64(u64, u64);
+    struct U64(#[allow(dead_code)] u64, #[allow(dead_code)] u64);
     #[repr(align(8))]
-    struct U64U64U32(u64, u64, u32);
+    struct U64U64U32(#[allow(dead_code)] u64, #[allow(dead_code)] u64, #[allow(dead_code)] u32);
     let data = [
         U64(1, 2),
         U64(3, 4),
@@ -2197,7 +2124,7 @@ fn test_slice_partition_dedup_multiple_ident() {
 #[test]
 fn test_slice_partition_dedup_partialeq() {
     #[derive(Debug)]
-    struct Foo(i32, i32);
+    struct Foo(i32, #[allow(dead_code)] i32);
 
     impl PartialEq for Foo {
         fn eq(&self, other: &Foo) -> bool {
@@ -2308,7 +2235,7 @@ fn test_is_sorted() {
 
     // Tests for is_sorted_by
     assert!(![6, 2, 8, 5, 1, -60, 1337].is_sorted());
-    assert!([6, 2, 8, 5, 1, -60, 1337].is_sorted_by(|_, _| Some(Ordering::Less)));
+    assert!([6, 2, 8, 5, 1, -60, 1337].is_sorted_by(|_, _| true));
 
     // Tests for is_sorted_by_key
     assert!([-2, -1, 0, 3].is_sorted());
@@ -2399,36 +2326,44 @@ mod swap_panics {
 }
 
 #[test]
-fn slice_split_array_mut() {
+fn slice_split_first_chunk_mut() {
     let v = &mut [1, 2, 3, 4, 5, 6][..];
 
     {
-        let (left, right) = v.split_array_mut::<0>();
+        let (left, right) = v.split_first_chunk_mut::<0>().unwrap();
         assert_eq!(left, &mut []);
         assert_eq!(right, [1, 2, 3, 4, 5, 6]);
     }
 
     {
-        let (left, right) = v.split_array_mut::<6>();
+        let (left, right) = v.split_first_chunk_mut::<6>().unwrap();
         assert_eq!(left, &mut [1, 2, 3, 4, 5, 6]);
         assert_eq!(right, []);
+    }
+
+    {
+        assert!(v.split_first_chunk_mut::<7>().is_none());
     }
 }
 
 #[test]
-fn slice_rsplit_array_mut() {
+fn slice_split_last_chunk_mut() {
     let v = &mut [1, 2, 3, 4, 5, 6][..];
 
     {
-        let (left, right) = v.rsplit_array_mut::<0>();
+        let (left, right) = v.split_last_chunk_mut::<0>().unwrap();
         assert_eq!(left, [1, 2, 3, 4, 5, 6]);
         assert_eq!(right, &mut []);
     }
 
     {
-        let (left, right) = v.rsplit_array_mut::<6>();
+        let (left, right) = v.split_last_chunk_mut::<6>().unwrap();
         assert_eq!(left, []);
         assert_eq!(right, &mut [1, 2, 3, 4, 5, 6]);
+    }
+
+    {
+        assert!(v.split_last_chunk_mut::<7>().is_none());
     }
 }
 
@@ -2444,36 +2379,24 @@ fn split_as_slice() {
     assert_eq!(split.as_slice(), &[]);
 }
 
-#[should_panic]
 #[test]
-fn slice_split_array_ref_out_of_bounds() {
-    let v = &[1, 2, 3, 4, 5, 6][..];
+fn slice_split_once() {
+    let v = &[1, 2, 3, 2, 4][..];
 
-    let _ = v.split_array_ref::<7>();
+    assert_eq!(v.split_once(|&x| x == 2), Some((&[1][..], &[3, 2, 4][..])));
+    assert_eq!(v.split_once(|&x| x == 1), Some((&[][..], &[2, 3, 2, 4][..])));
+    assert_eq!(v.split_once(|&x| x == 4), Some((&[1, 2, 3, 2][..], &[][..])));
+    assert_eq!(v.split_once(|&x| x == 0), None);
 }
 
-#[should_panic]
 #[test]
-fn slice_split_array_mut_out_of_bounds() {
-    let v = &mut [1, 2, 3, 4, 5, 6][..];
+fn slice_rsplit_once() {
+    let v = &[1, 2, 3, 2, 4][..];
 
-    let _ = v.split_array_mut::<7>();
-}
-
-#[should_panic]
-#[test]
-fn slice_rsplit_array_ref_out_of_bounds() {
-    let v = &[1, 2, 3, 4, 5, 6][..];
-
-    let _ = v.rsplit_array_ref::<7>();
-}
-
-#[should_panic]
-#[test]
-fn slice_rsplit_array_mut_out_of_bounds() {
-    let v = &mut [1, 2, 3, 4, 5, 6][..];
-
-    let _ = v.rsplit_array_mut::<7>();
+    assert_eq!(v.rsplit_once(|&x| x == 2), Some((&[1, 2, 3][..], &[4][..])));
+    assert_eq!(v.rsplit_once(|&x| x == 1), Some((&[][..], &[2, 3, 2, 4][..])));
+    assert_eq!(v.rsplit_once(|&x| x == 4), Some((&[1, 2, 3, 2][..], &[][..])));
+    assert_eq!(v.rsplit_once(|&x| x == 0), None);
 }
 
 macro_rules! take_tests {
@@ -2614,14 +2537,14 @@ fn test_slice_from_ptr_range() {
 #[should_panic = "slice len overflow"]
 fn test_flatten_size_overflow() {
     let x = &[[(); usize::MAX]; 2][..];
-    let _ = x.flatten();
+    let _ = x.as_flattened();
 }
 
 #[test]
 #[should_panic = "slice len overflow"]
 fn test_flatten_mut_size_overflow() {
     let x = &mut [[(); usize::MAX]; 2][..];
-    let _ = x.flatten_mut();
+    let _ = x.as_flattened_mut();
 }
 
 #[test]
@@ -2631,6 +2554,14 @@ fn test_get_many_mut_normal_2() {
     *a += 10;
     *b += 100;
     assert_eq!(v, vec![101, 2, 3, 14, 5]);
+
+    let [a, b] = v.get_many_mut([0..=1, 2..=2]).unwrap();
+    assert_eq!(a, &mut [101, 2][..]);
+    assert_eq!(b, &mut [3][..]);
+    a[0] += 10;
+    a[1] += 20;
+    b[0] += 100;
+    assert_eq!(v, vec![111, 22, 103, 14, 5]);
 }
 
 #[test]
@@ -2641,12 +2572,23 @@ fn test_get_many_mut_normal_3() {
     *b += 100;
     *c += 1000;
     assert_eq!(v, vec![11, 2, 1003, 4, 105]);
+
+    let [a, b, c] = v.get_many_mut([0..1, 4..5, 1..4]).unwrap();
+    assert_eq!(a, &mut [11][..]);
+    assert_eq!(b, &mut [105][..]);
+    assert_eq!(c, &mut [2, 1003, 4][..]);
+    a[0] += 10;
+    b[0] += 100;
+    c[0] += 1000;
+    assert_eq!(v, vec![21, 1002, 1003, 4, 205]);
 }
 
 #[test]
 fn test_get_many_mut_empty() {
     let mut v = vec![1, 2, 3, 4, 5];
-    let [] = v.get_many_mut([]).unwrap();
+    let [] = v.get_many_mut::<usize, 0>([]).unwrap();
+    let [] = v.get_many_mut::<RangeInclusive<usize>, 0>([]).unwrap();
+    let [] = v.get_many_mut::<Range<usize>, 0>([]).unwrap();
     assert_eq!(v, vec![1, 2, 3, 4, 5]);
 }
 
@@ -2682,4 +2624,65 @@ fn test_get_many_mut_oob_empty() {
 fn test_get_many_mut_duplicate() {
     let mut v = vec![1, 2, 3, 4, 5];
     assert!(v.get_many_mut([1, 3, 3, 4]).is_err());
+}
+
+#[test]
+fn test_get_many_mut_range_oob() {
+    let mut v = vec![1, 2, 3, 4, 5];
+    assert!(v.get_many_mut([0..6]).is_err());
+    assert!(v.get_many_mut([5..6]).is_err());
+    assert!(v.get_many_mut([6..6]).is_err());
+    assert!(v.get_many_mut([0..=5]).is_err());
+    assert!(v.get_many_mut([0..=6]).is_err());
+    assert!(v.get_many_mut([5..=5]).is_err());
+}
+
+#[test]
+fn test_get_many_mut_range_overlapping() {
+    let mut v = vec![1, 2, 3, 4, 5];
+    assert!(v.get_many_mut([0..1, 0..2]).is_err());
+    assert!(v.get_many_mut([0..1, 1..2, 0..1]).is_err());
+    assert!(v.get_many_mut([0..3, 1..1]).is_err());
+    assert!(v.get_many_mut([0..3, 1..2]).is_err());
+    assert!(v.get_many_mut([0..=0, 2..=2, 0..=1]).is_err());
+    assert!(v.get_many_mut([0..=4, 0..=0]).is_err());
+    assert!(v.get_many_mut([4..=4, 0..=0, 3..=4]).is_err());
+}
+
+#[test]
+fn test_get_many_mut_range_empty_at_edge() {
+    let mut v = vec![1, 2, 3, 4, 5];
+    assert_eq!(
+        v.get_many_mut([0..0, 0..5, 5..5]),
+        Ok([&mut [][..], &mut [1, 2, 3, 4, 5], &mut []]),
+    );
+    assert_eq!(
+        v.get_many_mut([0..0, 0..1, 1..1, 1..2, 2..2, 2..3, 3..3, 3..4, 4..4, 4..5, 5..5]),
+        Ok([
+            &mut [][..],
+            &mut [1],
+            &mut [],
+            &mut [2],
+            &mut [],
+            &mut [3],
+            &mut [],
+            &mut [4],
+            &mut [],
+            &mut [5],
+            &mut [],
+        ]),
+    );
+}
+
+#[test]
+fn test_slice_from_raw_parts_in_const() {
+    static FANCY: i32 = 4;
+    static FANCY_SLICE: &[i32] = unsafe { std::slice::from_raw_parts(&FANCY, 1) };
+    assert_eq!(FANCY_SLICE.as_ptr(), std::ptr::addr_of!(FANCY));
+    assert_eq!(FANCY_SLICE.len(), 1);
+
+    const EMPTY_SLICE: &[i32] =
+        unsafe { std::slice::from_raw_parts(std::ptr::without_provenance(123456), 0) };
+    assert_eq!(EMPTY_SLICE.as_ptr().addr(), 123456);
+    assert_eq!(EMPTY_SLICE.len(), 0);
 }

@@ -1,5 +1,6 @@
-use super::*;
 use core::iter::*;
+
+use super::*;
 
 #[test]
 fn test_zip_nth() {
@@ -184,7 +185,11 @@ fn test_zip_nested_sideffectful() {
         let it = xs.iter_mut().map(|x| *x = 1).enumerate().zip(&ys);
         it.count();
     }
-    assert_eq!(&xs, &[1, 1, 1, 1, 1, 0]);
+    let length_aware = &xs == &[1, 1, 1, 1, 0, 0];
+    let probe_first = &xs == &[1, 1, 1, 1, 1, 0];
+
+    // either implementation is valid according to zip documentation
+    assert!(length_aware || probe_first);
 }
 
 #[test]
@@ -235,8 +240,7 @@ fn test_zip_trusted_random_access_composition() {
 #[test]
 #[cfg(panic = "unwind")]
 fn test_zip_trusted_random_access_next_back_drop() {
-    use std::panic::catch_unwind;
-    use std::panic::AssertUnwindSafe;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     let mut counter = 0;
 

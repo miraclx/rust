@@ -1,17 +1,17 @@
 //! The compiler code necessary for `#[derive(RustcDecodable)]`. See encodable.rs for more.
 
-use crate::deriving::generic::ty::*;
-use crate::deriving::generic::*;
-use crate::deriving::pathvec_std;
 use rustc_ast::ptr::P;
 use rustc_ast::{self as ast, Expr, MetaItem, Mutability};
 use rustc_expand::base::{Annotatable, ExtCtxt};
-use rustc_span::symbol::{sym, Ident, Symbol};
-use rustc_span::Span;
-use thin_vec::{thin_vec, ThinVec};
+use rustc_span::{Ident, Span, Symbol, sym};
+use thin_vec::{ThinVec, thin_vec};
 
-pub fn expand_deriving_rustc_decodable(
-    cx: &mut ExtCtxt<'_>,
+use crate::deriving::generic::ty::*;
+use crate::deriving::generic::*;
+use crate::deriving::pathvec_std;
+
+pub(crate) fn expand_deriving_rustc_decodable(
+    cx: &ExtCtxt<'_>,
     span: Span,
     mitem: &MetaItem,
     item: &Annotatable,
@@ -31,10 +31,11 @@ pub fn expand_deriving_rustc_decodable(
         methods: vec![MethodDef {
             name: sym::decode,
             generics: Bounds {
-                bounds: vec![(
-                    typaram,
-                    vec![Path::new_(vec![krate, sym::Decoder], vec![], PathKind::Global)],
-                )],
+                bounds: vec![(typaram, vec![Path::new_(
+                    vec![krate, sym::Decoder],
+                    vec![],
+                    PathKind::Global,
+                )])],
             },
             explicit_self: false,
             nonself_args: vec![(
@@ -63,7 +64,7 @@ pub fn expand_deriving_rustc_decodable(
 }
 
 fn decodable_substructure(
-    cx: &mut ExtCtxt<'_>,
+    cx: &ExtCtxt<'_>,
     trait_span: Span,
     substr: &Substructure<'_>,
     krate: Symbol,
@@ -93,32 +94,24 @@ fn decodable_substructure(
                 decode_static_fields(cx, trait_span, path, summary, |cx, span, name, field| {
                     cx.expr_try(
                         span,
-                        cx.expr_call_global(
-                            span,
-                            fn_read_struct_field_path.clone(),
-                            thin_vec![
-                                blkdecoder.clone(),
-                                cx.expr_str(span, name),
-                                cx.expr_usize(span, field),
-                                exprdecode.clone(),
-                            ],
-                        ),
+                        cx.expr_call_global(span, fn_read_struct_field_path.clone(), thin_vec![
+                            blkdecoder.clone(),
+                            cx.expr_str(span, name),
+                            cx.expr_usize(span, field),
+                            exprdecode.clone(),
+                        ]),
                     )
                 });
             let result = cx.expr_ok(trait_span, result);
             let fn_read_struct_path: Vec<_> =
                 cx.def_site_path(&[sym::rustc_serialize, sym::Decoder, sym::read_struct]);
 
-            cx.expr_call_global(
-                trait_span,
-                fn_read_struct_path,
-                thin_vec![
-                    decoder,
-                    cx.expr_str(trait_span, substr.type_ident.name),
-                    cx.expr_usize(trait_span, nfields),
-                    cx.lambda1(trait_span, result, blkarg),
-                ],
-            )
+            cx.expr_call_global(trait_span, fn_read_struct_path, thin_vec![
+                decoder,
+                cx.expr_str(trait_span, substr.type_ident.name),
+                cx.expr_usize(trait_span, nfields),
+                cx.lambda1(trait_span, result, blkarg),
+            ])
         }
         StaticEnum(_, fields) => {
             let variant = Ident::new(sym::i, trait_span);
@@ -159,25 +152,21 @@ fn decodable_substructure(
             let variant_array_ref = cx.expr_array_ref(trait_span, variants);
             let fn_read_enum_variant_path: Vec<_> =
                 cx.def_site_path(&[sym::rustc_serialize, sym::Decoder, sym::read_enum_variant]);
-            let result = cx.expr_call_global(
-                trait_span,
-                fn_read_enum_variant_path,
-                thin_vec![blkdecoder, variant_array_ref, lambda],
-            );
+            let result = cx.expr_call_global(trait_span, fn_read_enum_variant_path, thin_vec![
+                blkdecoder,
+                variant_array_ref,
+                lambda
+            ]);
             let fn_read_enum_path: Vec<_> =
                 cx.def_site_path(&[sym::rustc_serialize, sym::Decoder, sym::read_enum]);
 
-            cx.expr_call_global(
-                trait_span,
-                fn_read_enum_path,
-                thin_vec![
-                    decoder,
-                    cx.expr_str(trait_span, substr.type_ident.name),
-                    cx.lambda1(trait_span, result, blkarg),
-                ],
-            )
+            cx.expr_call_global(trait_span, fn_read_enum_path, thin_vec![
+                decoder,
+                cx.expr_str(trait_span, substr.type_ident.name),
+                cx.lambda1(trait_span, result, blkarg),
+            ])
         }
-        _ => cx.bug("expected StaticEnum or StaticStruct in derive(Decodable)"),
+        _ => cx.dcx().bug("expected StaticEnum or StaticStruct in derive(Decodable)"),
     };
     BlockOrExpr::new_expr(expr)
 }
@@ -186,19 +175,19 @@ fn decodable_substructure(
 /// - `outer_pat_path` is the path to this enum variant/struct
 /// - `getarg` should retrieve the `usize`-th field with name `@str`.
 fn decode_static_fields<F>(
-    cx: &mut ExtCtxt<'_>,
+    cx: &ExtCtxt<'_>,
     trait_span: Span,
     outer_pat_path: ast::Path,
     fields: &StaticFields,
     mut getarg: F,
 ) -> P<Expr>
 where
-    F: FnMut(&mut ExtCtxt<'_>, Span, Symbol, usize) -> P<Expr>,
+    F: FnMut(&ExtCtxt<'_>, Span, Symbol, usize) -> P<Expr>,
 {
     match fields {
         Unnamed(fields, is_tuple) => {
             let path_expr = cx.expr_path(outer_pat_path);
-            if !*is_tuple {
+            if matches!(is_tuple, IsTuple::No) {
                 path_expr
             } else {
                 let fields = fields
@@ -215,7 +204,7 @@ where
             let fields = fields
                 .iter()
                 .enumerate()
-                .map(|(i, &(ident, span))| {
+                .map(|(i, &(ident, span, _))| {
                     let arg = getarg(cx, span, ident.name, i);
                     cx.field_imm(span, ident, arg)
                 })

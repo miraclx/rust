@@ -56,10 +56,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![stable(feature = "alloc_module", since = "1.28.0")]
 
-use core::intrinsics;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, Ordering};
-use core::{mem, ptr};
+use core::{hint, mem, ptr};
 
 #[stable(feature = "alloc_module", since = "1.28.0")]
 #[doc(inline)]
@@ -73,7 +72,9 @@ pub use alloc_crate::alloc::*;
 /// work, such as to serve alignment requests greater than the alignment
 /// provided directly by the backing system allocator.
 ///
-/// This type implements the `GlobalAlloc` trait and Rust programs by default
+/// This type implements the [`GlobalAlloc`] trait. Currently the default
+/// global allocator is unspecified. Libraries, however, like `cdylib`s and
+/// `staticlib`s are guaranteed to use the [`System`] by default and as such
 /// work as if they had this definition:
 ///
 /// ```rust
@@ -172,7 +173,7 @@ impl System {
                 let new_size = new_layout.size();
 
                 // `realloc` probably checks for `new_size >= old_layout.size()` or something similar.
-                intrinsics::assume(new_size >= old_layout.size());
+                hint::assert_unchecked(new_size >= old_layout.size());
 
                 let raw_ptr = GlobalAlloc::realloc(self, ptr.as_ptr(), old_layout, new_size);
                 let ptr = NonNull::new(raw_ptr).ok_or(AllocError)?;
@@ -264,7 +265,7 @@ unsafe impl Allocator for System {
             // SAFETY: `new_size` is non-zero. Other conditions must be upheld by the caller
             new_size if old_layout.align() == new_layout.align() => unsafe {
                 // `realloc` probably checks for `new_size <= old_layout.size()` or something similar.
-                intrinsics::assume(new_size <= old_layout.size());
+                hint::assert_unchecked(new_size <= old_layout.size());
 
                 let raw_ptr = GlobalAlloc::realloc(self, ptr.as_ptr(), old_layout, new_size);
                 let ptr = NonNull::new(raw_ptr).ok_or(AllocError)?;
@@ -329,7 +330,7 @@ static HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 /// ```
 #[unstable(feature = "alloc_error_hook", issue = "51245")]
 pub fn set_alloc_error_hook(hook: fn(Layout)) {
-    HOOK.store(hook as *mut (), Ordering::SeqCst);
+    HOOK.store(hook as *mut (), Ordering::Release);
 }
 
 /// Unregisters the current allocation error hook, returning it.
@@ -339,7 +340,7 @@ pub fn set_alloc_error_hook(hook: fn(Layout)) {
 /// If no custom hook is registered, the default hook will be returned.
 #[unstable(feature = "alloc_error_hook", issue = "51245")]
 pub fn take_alloc_error_hook() -> fn(Layout) {
-    let hook = HOOK.swap(ptr::null_mut(), Ordering::SeqCst);
+    let hook = HOOK.swap(ptr::null_mut(), Ordering::Acquire);
     if hook.is_null() { default_alloc_error_hook } else { unsafe { mem::transmute(hook) } }
 }
 
@@ -353,6 +354,12 @@ fn default_alloc_error_hook(layout: Layout) {
     if unsafe { __rust_alloc_error_handler_should_panic != 0 } {
         panic!("memory allocation of {} bytes failed", layout.size());
     } else {
+        // This is the default path taken on OOM, and the only path taken on stable with std.
+        // Crucially, it does *not* call any user-defined code, and therefore users do not have to
+        // worry about allocation failure causing reentrancy issues. That makes it different from
+        // the default `__rdl_oom` defined in alloc (i.e., the default alloc error handler that is
+        // called when there is no `#[alloc_error_handler]`), which triggers a regular panic and
+        // thus can invoke a user-defined panic hook, executing arbitrary user-defined code.
         rtprintpanic!("memory allocation of {} bytes failed\n", layout.size());
     }
 }
@@ -362,7 +369,7 @@ fn default_alloc_error_hook(layout: Layout) {
 #[alloc_error_handler]
 #[unstable(feature = "alloc_internals", issue = "none")]
 pub fn rust_oom(layout: Layout) -> ! {
-    let hook = HOOK.load(Ordering::SeqCst);
+    let hook = HOOK.load(Ordering::Acquire);
     let hook: fn(Layout) =
         if hook.is_null() { default_alloc_error_hook } else { unsafe { mem::transmute(hook) } };
     hook(layout);

@@ -1,8 +1,7 @@
-// We specify incremental here because we want to test the partitioning for
-// incremental compilation
-// incremental
-// compile-flags:-Zprint-mono-items=lazy
-// compile-flags:-Ccodegen-units=3
+// We specify incremental here because we want to test the partitioning for incremental compilation
+//@ incremental
+//@ compile-flags:-Zprint-mono-items=lazy
+//@ compile-flags:-Ccodegen-units=3
 
 #![crate_type = "rlib"]
 

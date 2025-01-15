@@ -2,13 +2,13 @@ use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::get_trait_def_id;
 use clippy_utils::higher::VecArgs;
 use clippy_utils::macros::root_macro_call_first_node;
-use clippy_utils::source::snippet_opt;
+use clippy_utils::source::SpanRangeExt;
 use clippy_utils::ty::implements_trait;
 use rustc_ast::{LitIntType, LitKind, UintTy};
 use rustc_errors::Applicability;
-use rustc_hir::{Expr, ExprKind, LangItem, QPath};
+use rustc_hir::{Expr, ExprKind, LangItem, QPath, StructTailExpr};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use std::fmt::{self, Display, Formatter};
 
 declare_clippy_lint! {
@@ -21,11 +21,11 @@ declare_clippy_lint! {
     /// the end of the range to be the length instead.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x = [0..200];
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// // If it was intended to include every element in the range...
     /// let x = (0..200).collect::<Vec<i32>>();
     /// // ...Or if 200 was meant to be the len
@@ -86,20 +86,21 @@ impl LateLintPass<'_> for SingleRangeInVecInit {
             return;
         };
 
-        let ExprKind::Struct(QPath::LangItem(lang_item, ..), [start, end], None) = inner_expr.kind else {
+        let ExprKind::Struct(QPath::LangItem(lang_item, ..), [start, end], StructTailExpr::None) = inner_expr.kind
+        else {
             return;
         };
 
         if matches!(lang_item, LangItem::Range)
             && let ty = cx.typeck_results().expr_ty(start.expr)
-            && let Some(snippet) = snippet_opt(cx, span)
+            && let Some(snippet) = span.get_source_text(cx)
             // `is_from_proc_macro` will skip any `vec![]`. Let's not!
             && snippet.starts_with(suggested_type.starts_with())
             && snippet.ends_with(suggested_type.ends_with())
-            && let Some(start_snippet) = snippet_opt(cx, start.span)
-            && let Some(end_snippet) = snippet_opt(cx, end.span)
+            && let Some(start_snippet) = start.span.get_source_text(cx)
+            && let Some(end_snippet) = end.span.get_source_text(cx)
         {
-            let should_emit_every_value = if let Some(step_def_id) = get_trait_def_id(cx, &["core", "iter", "Step"])
+            let should_emit_every_value = if let Some(step_def_id) = get_trait_def_id(cx.tcx, &["core", "iter", "Step"])
                 && implements_trait(cx, ty, step_def_id, &[])
             {
                 true
@@ -122,7 +123,7 @@ impl LateLintPass<'_> for SingleRangeInVecInit {
                     cx,
                     SINGLE_RANGE_IN_VEC_INIT,
                     span,
-                    &format!("{suggested_type} of `Range` that is only one element"),
+                    format!("{suggested_type} of `Range` that is only one element"),
                     |diag| {
                         if should_emit_every_value {
                             diag.span_suggestion(

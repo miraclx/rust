@@ -1,4 +1,3 @@
-#![feature(const_fn_floating_point_arithmetic)]
 #![warn(clippy::suboptimal_flops)]
 
 /// Allow suboptimal_ops in constant context
@@ -33,6 +32,27 @@ fn main() {
 
     let _ = (a * a + b).sqrt();
 
+    let u = 1usize;
+    let _ = a - (b * u as f64);
+
     // Cases where the lint shouldn't be applied
     let _ = (a * a + b * b).sqrt();
+}
+
+fn _issue11831() {
+    struct NotAFloat;
+
+    impl std::ops::Add<f64> for NotAFloat {
+        type Output = Self;
+
+        fn add(self, _: f64) -> Self {
+            NotAFloat
+        }
+    }
+
+    let a = NotAFloat;
+    let b = 1.0_f64;
+    let c = 1.0;
+
+    let _ = a + b * c;
 }

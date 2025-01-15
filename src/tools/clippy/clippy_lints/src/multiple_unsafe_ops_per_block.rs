@@ -1,28 +1,28 @@
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::visitors::{for_each_expr_with_closures, Descend, Visitable};
+use clippy_utils::visitors::{Descend, Visitable, for_each_expr};
 use core::ops::ControlFlow::Continue;
 use hir::def::{DefKind, Res};
-use hir::{BlockCheckMode, ExprKind, QPath, UnOp, Unsafety};
+use hir::{BlockCheckMode, ExprKind, QPath, UnOp};
 use rustc_ast::Mutability;
 use rustc_hir as hir;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::Span;
+use rustc_session::declare_lint_pass;
+use rustc_span::{DesugaringKind, Span};
 
 declare_clippy_lint! {
     /// ### What it does
     /// Checks for `unsafe` blocks that contain more than one unsafe operation.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Combined with `undocumented_unsafe_blocks`,
     /// this lint ensures that each unsafe operation must be independently justified.
     /// Combined with `unused_unsafe`, this lint also ensures
     /// elimination of unnecessary unsafe blocks through refactoring.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// /// Reads a `char` from the given pointer.
     /// ///
     /// /// # Safety
@@ -36,7 +36,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// /// Reads a `char` from the given pointer.
     /// ///
     /// /// # Safety
@@ -64,7 +64,10 @@ declare_lint_pass!(MultipleUnsafeOpsPerBlock => [MULTIPLE_UNSAFE_OPS_PER_BLOCK])
 
 impl<'tcx> LateLintPass<'tcx> for MultipleUnsafeOpsPerBlock {
     fn check_block(&mut self, cx: &LateContext<'tcx>, block: &'tcx hir::Block<'_>) {
-        if !matches!(block.rules, BlockCheckMode::UnsafeBlock(_)) || in_external_macro(cx.tcx.sess, block.span) {
+        if !matches!(block.rules, BlockCheckMode::UnsafeBlock(_))
+            || in_external_macro(cx.tcx.sess, block.span)
+            || block.span.is_desugaring(DesugaringKind::Await)
+        {
             return;
         }
         let mut unsafe_ops = vec![];
@@ -74,7 +77,7 @@ impl<'tcx> LateLintPass<'tcx> for MultipleUnsafeOpsPerBlock {
                 cx,
                 MULTIPLE_UNSAFE_OPS_PER_BLOCK,
                 block.span,
-                &format!(
+                format!(
                     "this `unsafe` block contains {} unsafe operations, expected only one",
                     unsafe_ops.len()
                 ),
@@ -93,7 +96,7 @@ fn collect_unsafe_exprs<'tcx>(
     node: impl Visitable<'tcx>,
     unsafe_ops: &mut Vec<(&'static str, Span)>,
 ) {
-    for_each_expr_with_closures(cx, node, |expr| {
+    for_each_expr(cx, node, |expr| {
         match expr.kind {
             ExprKind::InlineAsm(_) => unsafe_ops.push(("inline assembly used here", expr.span)),
 
@@ -106,7 +109,14 @@ fn collect_unsafe_exprs<'tcx>(
             ExprKind::Path(QPath::Resolved(
                 _,
                 hir::Path {
-                    res: Res::Def(DefKind::Static(Mutability::Mut), _),
+                    res:
+                        Res::Def(
+                            DefKind::Static {
+                                mutability: Mutability::Mut,
+                                ..
+                            },
+                            _,
+                        ),
                     ..
                 },
             )) => {
@@ -120,10 +130,10 @@ fn collect_unsafe_exprs<'tcx>(
             ExprKind::Call(path_expr, _) => {
                 let sig = match *cx.typeck_results().expr_ty(path_expr).kind() {
                     ty::FnDef(id, _) => cx.tcx.fn_sig(id).skip_binder(),
-                    ty::FnPtr(sig) => sig,
+                    ty::FnPtr(sig_tys, hdr) => sig_tys.with(hdr),
                     _ => return Continue(Descend::Yes),
                 };
-                if sig.unsafety() == Unsafety::Unsafe {
+                if sig.safety().is_unsafe() {
                     unsafe_ops.push(("unsafe function call occurs here", expr.span));
                 }
             },
@@ -134,7 +144,7 @@ fn collect_unsafe_exprs<'tcx>(
                     .type_dependent_def_id(expr.hir_id)
                     .map(|def_id| cx.tcx.fn_sig(def_id))
                 {
-                    if sig.skip_binder().unsafety() == Unsafety::Unsafe {
+                    if sig.skip_binder().safety().is_unsafe() {
                         unsafe_ops.push(("unsafe method call occurs here", expr.span));
                     }
                 }
@@ -143,13 +153,16 @@ fn collect_unsafe_exprs<'tcx>(
             ExprKind::AssignOp(_, lhs, rhs) | ExprKind::Assign(lhs, rhs, _) => {
                 if matches!(
                     lhs.kind,
-                    ExprKind::Path(QPath::Resolved(
-                        _,
-                        hir::Path {
-                            res: Res::Def(DefKind::Static(Mutability::Mut), _),
-                            ..
-                        }
-                    ))
+                    ExprKind::Path(QPath::Resolved(_, hir::Path {
+                        res: Res::Def(
+                            DefKind::Static {
+                                mutability: Mutability::Mut,
+                                ..
+                            },
+                            _
+                        ),
+                        ..
+                    }))
                 ) {
                     unsafe_ops.push(("modification of a mutable static occurs here", expr.span));
                     collect_unsafe_exprs(cx, rhs, unsafe_ops);

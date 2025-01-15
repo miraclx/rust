@@ -5,8 +5,7 @@ use rustc_feature::Features;
 use rustc_session::Session;
 use rustc_span::edition::Edition::*;
 use rustc_span::hygiene::AstPass;
-use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::DUMMY_SP;
+use rustc_span::{DUMMY_SP, Ident, Symbol, kw, sym};
 use thin_vec::thin_vec;
 
 pub fn inject(
@@ -17,7 +16,7 @@ pub fn inject(
     features: &Features,
 ) -> usize {
     let orig_num_items = krate.items.len();
-    let edition = sess.parse_sess.edition;
+    let edition = sess.psess.edition;
 
     // the first name in this list is the crate name of the crate with the prelude
     let names: &[Symbol] = if attr::contains_name(pre_configured_attrs, sym::no_core) {

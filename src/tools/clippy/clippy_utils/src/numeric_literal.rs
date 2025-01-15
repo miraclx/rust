@@ -53,7 +53,7 @@ impl<'a> NumericLiteral<'a> {
                 .trim_start()
                 .chars()
                 .next()
-                .map_or(false, |c| c.is_ascii_digit())
+                .is_some_and(|c| c.is_ascii_digit())
         {
             let (unsuffixed, suffix) = split_suffix(src, lit_kind);
             let float = matches!(lit_kind, LitKind::Float(..));
@@ -164,6 +164,8 @@ impl<'a> NumericLiteral<'a> {
             if !exponent.is_empty() && exponent != "0" {
                 output.push_str(separator);
                 Self::group_digits(&mut output, exponent, group_size, true, false);
+            } else if exponent == "0" && self.fraction.is_none() && self.suffix.is_none() {
+                output.push_str(".0");
             }
         }
 

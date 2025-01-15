@@ -13,7 +13,7 @@ pub(crate) fn unresolved_macro_call(
     let bang = if d.is_bang { "!" } else { "" };
     Diagnostic::new(
         DiagnosticCode::RustcHardError("unresolved-macro-call"),
-        format!("unresolved macro `{}{bang}`", d.path.display(ctx.sema.db)),
+        format!("unresolved macro `{}{bang}`", d.path.display(ctx.sema.db, ctx.edition)),
         display_range,
     )
     .experimental()
@@ -68,6 +68,43 @@ macro_rules! m { () => {} } }
 self::m!(); self::m2!();
                 //^^ error: unresolved macro `self::m2!`
 "#,
+        );
+    }
+
+    #[test]
+    fn regression_panic_with_inner_attribute_in_presence_of_unresolved_crate() {
+        check_diagnostics(
+            r#"
+    mod _test_inner {
+        #![empty_attr]
+      //^^^^^^^^^^^^^^ error: unresolved macro `empty_attr`
+    }
+"#,
+        );
+    }
+
+    #[test]
+    fn no_unresolved_panic_inside_mod_inside_fn() {
+        check_diagnostics(
+            r#"
+//- /core.rs library crate:core
+#[macro_export]
+macro_rules! panic {
+    () => {};
+}
+
+//- /lib.rs crate:foo deps:core
+#[macro_use]
+extern crate core;
+
+fn foo() {
+    mod init {
+        pub fn init() {
+            panic!();
+        }
+    }
+}
+    "#,
         );
     }
 }

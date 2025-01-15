@@ -1,5 +1,7 @@
-use rustc_data_structures::sync::Lrc;
 use std::path::PathBuf;
+
+use rustc_data_structures::sync::Lrc;
+use rustc_macros::{Decodable, Encodable, HashStable};
 
 #[derive(HashStable)]
 #[derive(Copy, PartialEq, PartialOrd, Clone, Ord, Eq, Hash, Debug, Encodable, Decodable)]
@@ -30,7 +32,7 @@ impl DebuggerVisualizerFile {
 
     pub fn path_erased(&self) -> Self {
         DebuggerVisualizerFile {
-            src: self.src.clone(),
+            src: Lrc::clone(&self.src),
             visualizer_type: self.visualizer_type,
             path: None,
         }

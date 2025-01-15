@@ -1,4 +1,4 @@
-// run-pass
+//@ run-pass
 
 // Regression test for https://github.com/rust-lang/rust/issues/114388
 
@@ -20,7 +20,7 @@ impl std::ops::Index<usize> for A {
     type Output = ();
 
     fn index(&self, _idx: usize) -> &() {
-        // Use the relative number to make it resistent to header changes.
+        // Use the relative number to make it resistant to header changes.
         assert_eq!(caller_line(), self.prev_line + 2);
         &()
     }

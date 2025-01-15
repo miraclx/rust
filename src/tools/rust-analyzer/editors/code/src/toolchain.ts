@@ -3,9 +3,8 @@ import * as os from "os";
 import * as path from "path";
 import * as readline from "readline";
 import * as vscode from "vscode";
-import { execute, log, memoizeAsync } from "./util";
-import { unwrapNullable } from "./nullable";
-import { unwrapUndefinable } from "./undefinable";
+import { log, memoizeAsync, unwrapUndefinable } from "./util";
+import type { CargoRunnableArgs } from "./lsp_ext";
 
 interface CompilationArtifact {
     fileName: string;
@@ -27,11 +26,10 @@ export class Cargo {
     ) {}
 
     // Made public for testing purposes
-    static artifactSpec(args: readonly string[]): ArtifactSpec {
-        const cargoArgs = [...args, "--message-format=json"];
-
+    static artifactSpec(cargoArgs: string[], executableArgs?: string[]): ArtifactSpec {
+        cargoArgs = [...cargoArgs, "--message-format=json"];
         // arguments for a runnable from the quick pick should be updated.
-        // see crates\rust-analyzer\src\main_loop\handlers.rs, handle_code_lens
+        // see crates\rust-analyzer\src\handlers\request.rs, handle_code_lens
         switch (cargoArgs[0]) {
             case "run":
                 cargoArgs[0] = "build";
@@ -50,11 +48,17 @@ export class Cargo {
             // produce 2 artifacts: {"kind": "bin"} and {"kind": "test"}
             result.filter = (artifacts) => artifacts.filter((it) => it.isTest);
         }
+        if (executableArgs) {
+            cargoArgs.push("--", ...executableArgs);
+        }
 
         return result;
     }
 
-    private async getArtifacts(spec: ArtifactSpec): Promise<CompilationArtifact[]> {
+    private async getArtifacts(
+        spec: ArtifactSpec,
+        env?: Record<string, string>,
+    ): Promise<CompilationArtifact[]> {
         const artifacts: CompilationArtifact[] = [];
 
         try {
@@ -77,6 +81,7 @@ export class Cargo {
                     }
                 },
                 (stderr) => this.output.append(stderr),
+                env,
             );
         } catch (err) {
             this.output.show(true);
@@ -86,8 +91,11 @@ export class Cargo {
         return spec.filter?.(artifacts) ?? artifacts;
     }
 
-    async executableFromArgs(args: readonly string[]): Promise<string> {
-        const artifacts = await this.getArtifacts(Cargo.artifactSpec(args));
+    async executableFromArgs(runnableArgs: CargoRunnableArgs): Promise<string> {
+        const artifacts = await this.getArtifacts(
+            Cargo.artifactSpec(runnableArgs.cargoArgs, runnableArgs.executableArgs),
+            runnableArgs.environment,
+        );
 
         if (artifacts.length === 0) {
             throw new Error("No compilation artifacts");
@@ -103,8 +111,9 @@ export class Cargo {
         cargoArgs: string[],
         onStdoutJson: (obj: any) => void,
         onStderrString: (data: string) => void,
+        env?: Record<string, string>,
     ): Promise<number> {
-        const path = await cargoPath();
+        const path = await cargoPath(env);
         return await new Promise((resolve, reject) => {
             const cargo = cp.spawn(path, cargoArgs, {
                 stdio: ["ignore", "pipe", "pipe"],
@@ -130,33 +139,17 @@ export class Cargo {
     }
 }
 
-/** Mirrors `project_model::sysroot::discover_sysroot_dir()` implementation*/
-export async function getSysroot(dir: string): Promise<string> {
-    const rustcPath = await getPathForExecutable("rustc");
-
-    // do not memoize the result because the toolchain may change between runs
-    return await execute(`${rustcPath} --print sysroot`, { cwd: dir });
-}
-
-export async function getRustcId(dir: string): Promise<string> {
-    const rustcPath = await getPathForExecutable("rustc");
-
-    // do not memoize the result because the toolchain may change between runs
-    const data = await execute(`${rustcPath} -V -v`, { cwd: dir });
-    const rx = /commit-hash:\s(.*)$/m;
-
-    const result = unwrapNullable(rx.exec(data));
-    const first = unwrapUndefinable(result[1]);
-    return first;
-}
-
 /** Mirrors `toolchain::cargo()` implementation */
-export function cargoPath(): Promise<string> {
+// FIXME: The server should provide this
+export function cargoPath(env?: Record<string, string>): Promise<string> {
+    if (env?.["RUSTC_TOOLCHAIN"]) {
+        return Promise.resolve("cargo");
+    }
     return getPathForExecutable("cargo");
 }
 
 /** Mirrors `toolchain::get_path_for_executable()` implementation */
-export const getPathForExecutable = memoizeAsync(
+const getPathForExecutable = memoizeAsync(
     // We apply caching to decrease file-system interactions
     async (executableName: "cargo" | "rustc" | "rustup"): Promise<string> => {
         {

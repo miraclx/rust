@@ -1,19 +1,25 @@
-use crate::dep_graph::{DepNode, WorkProduct, WorkProductId};
-use crate::ty::{GenericArgs, Instance, InstanceDef, SymbolName, TyCtxt};
-use rustc_attr::InlineAttr;
-use rustc_data_structures::base_n;
-use rustc_data_structures::fingerprint::Fingerprint;
-use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::stable_hasher::{Hash128, HashStable, StableHasher};
-use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
-use rustc_hir::ItemId;
-use rustc_index::Idx;
-use rustc_query_system::ich::StableHashingContext;
-use rustc_session::config::OptLevel;
-use rustc_span::source_map::Span;
-use rustc_span::symbol::Symbol;
 use std::fmt;
 use std::hash::Hash;
+
+use rustc_attr_parsing::InlineAttr;
+use rustc_data_structures::base_n::{BaseNString, CASE_INSENSITIVE, ToBaseN};
+use rustc_data_structures::fingerprint::Fingerprint;
+use rustc_data_structures::fx::FxIndexMap;
+use rustc_data_structures::stable_hasher::{Hash128, HashStable, StableHasher, ToStableHashKey};
+use rustc_data_structures::unord::UnordMap;
+use rustc_hir::ItemId;
+use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
+use rustc_index::Idx;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable};
+use rustc_query_system::ich::StableHashingContext;
+use rustc_session::config::OptLevel;
+use rustc_span::{Span, Symbol};
+use rustc_target::spec::SymbolVisibility;
+use tracing::debug;
+
+use crate::dep_graph::{DepNode, WorkProduct, WorkProductId};
+use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
+use crate::ty::{GenericArgs, Instance, InstanceKind, SymbolName, TyCtxt};
 
 /// Describes how a monomorphization will be instantiated in object files.
 #[derive(PartialEq)]
@@ -40,7 +46,7 @@ pub enum InstantiationMode {
     LocalCopy,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, HashStable)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, HashStable, TyEncodable, TyDecodable)]
 pub enum MonoItem<'tcx> {
     Fn(Instance<'tcx>),
     Static(DefId),
@@ -51,7 +57,7 @@ impl<'tcx> MonoItem<'tcx> {
     /// Returns `true` if the mono item is user-defined (i.e. not compiler-generated, like shims).
     pub fn is_user_defined(&self) -> bool {
         match *self {
-            MonoItem::Fn(instance) => matches!(instance.def, InstanceDef::Item(..)),
+            MonoItem::Fn(instance) => matches!(instance.def, InstanceKind::Item(..)),
             MonoItem::Static(..) | MonoItem::GlobalAsm(..) => true,
         }
     }
@@ -60,18 +66,7 @@ impl<'tcx> MonoItem<'tcx> {
     // change NON_INCR_MIN_CGU_SIZE as well.
     pub fn size_estimate(&self, tcx: TyCtxt<'tcx>) -> usize {
         match *self {
-            MonoItem::Fn(instance) => {
-                match instance.def {
-                    // "Normal" functions size estimate: the number of
-                    // statements, plus one for the terminator.
-                    InstanceDef::Item(..) | InstanceDef::DropGlue(..) => {
-                        let mir = tcx.instance_mir(instance.def);
-                        mir.basic_blocks.iter().map(|bb| bb.statements.len() + 1).sum()
-                    }
-                    // Other compiler-generated shims size estimate: 1
-                    _ => 1,
-                }
-            }
+            MonoItem::Fn(instance) => tcx.size_estimate(instance),
             // Conservatively estimate the size of a static declaration or
             // assembly item to be 1.
             MonoItem::Static(_) | MonoItem::GlobalAsm(_) => 1,
@@ -79,8 +74,8 @@ impl<'tcx> MonoItem<'tcx> {
     }
 
     pub fn is_generic_fn(&self) -> bool {
-        match *self {
-            MonoItem::Fn(ref instance) => instance.args.non_erasable_generics().next().is_some(),
+        match self {
+            MonoItem::Fn(instance) => instance.args.non_erasable_generics().next().is_some(),
             MonoItem::Static(..) | MonoItem::GlobalAsm(..) => false,
         }
     }
@@ -109,11 +104,20 @@ impl<'tcx> MonoItem<'tcx> {
                 let entry_def_id = tcx.entry_fn(()).map(|(id, _)| id);
                 // If this function isn't inlined or otherwise has an extern
                 // indicator, then we'll be creating a globally shared version.
-                if tcx.codegen_fn_attrs(instance.def_id()).contains_extern_indicator()
+                let codegen_fn_attrs = tcx.codegen_fn_attrs(instance.def_id());
+                if codegen_fn_attrs.contains_extern_indicator()
+                    || codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::NAKED)
                     || !instance.def.generates_cgu_internal_copy(tcx)
                     || Some(instance.def_id()) == entry_def_id
                 {
                     return InstantiationMode::GloballyShared { may_conflict: false };
+                }
+
+                if let InlineAttr::Never = tcx.codegen_fn_attrs(instance.def_id()).inline
+                    && self.is_generic_fn()
+                {
+                    // Upgrade inline(never) to a globally shared instance.
+                    return InstantiationMode::GloballyShared { may_conflict: true };
                 }
 
                 // At this point we don't have explicit linkage and we're an
@@ -128,9 +132,10 @@ impl<'tcx> MonoItem<'tcx> {
                 // creating one copy of this `#[inline]` function which may
                 // conflict with upstream crates as it could be an exported
                 // symbol.
-                match tcx.codegen_fn_attrs(instance.def_id()).inline {
-                    InlineAttr::Always => InstantiationMode::LocalCopy,
-                    _ => InstantiationMode::GloballyShared { may_conflict: true },
+                if tcx.codegen_fn_attrs(instance.def_id()).inline.always() {
+                    InstantiationMode::LocalCopy
+                } else {
+                    InstantiationMode::GloballyShared { may_conflict: true }
                 }
             }
             MonoItem::Static(..) | MonoItem::GlobalAsm(..) => {
@@ -184,7 +189,7 @@ impl<'tcx> MonoItem<'tcx> {
             MonoItem::GlobalAsm(..) => return true,
         };
 
-        !tcx.subst_and_check_impossible_predicates((def_id, &args))
+        !tcx.instantiate_and_check_impossible_predicates((def_id, &args))
     }
 
     pub fn local_span(&self, tcx: TyCtxt<'tcx>) -> Option<Span> {
@@ -232,14 +237,24 @@ impl<'tcx> fmt::Display for MonoItem<'tcx> {
     }
 }
 
-#[derive(Debug)]
+impl ToStableHashKey<StableHashingContext<'_>> for MonoItem<'_> {
+    type KeyType = Fingerprint;
+
+    fn to_stable_hash_key(&self, hcx: &StableHashingContext<'_>) -> Self::KeyType {
+        let mut hasher = StableHasher::new();
+        self.hash_stable(&mut hcx.clone(), &mut hasher);
+        hasher.finish()
+    }
+}
+
+#[derive(Debug, HashStable)]
 pub struct CodegenUnit<'tcx> {
     /// A name for this CGU. Incremental compilation requires that
     /// name be unique amongst **all** crates. Therefore, it should
     /// contain something unique to this crate (e.g., a module path)
     /// as well as the crate name and disambiguator.
     name: Symbol,
-    items: FxHashMap<MonoItem<'tcx>, MonoItemData>,
+    items: FxIndexMap<MonoItem<'tcx>, MonoItemData>,
     size_estimate: usize,
     primary: bool,
     /// True if this is CGU is used to hold code coverage information for dead code,
@@ -279,11 +294,33 @@ pub enum Linkage {
     Common,
 }
 
+/// Specifies the symbol visibility with regards to dynamic linking.
+///
+/// Visibility doesn't have any effect when linkage is internal.
+///
+/// DSO means dynamic shared object, that is a dynamically linked executable or dylib.
 #[derive(Copy, Clone, PartialEq, Debug, HashStable)]
 pub enum Visibility {
+    /// Export the symbol from the DSO and apply overrides of the symbol by outside DSOs to within
+    /// the DSO if the object file format supports this.
     Default,
+    /// Hide the symbol outside of the defining DSO even when external linkage is used to export it
+    /// from the object file.
     Hidden,
+    /// Export the symbol from the DSO, but don't apply overrides of the symbol by outside DSOs to
+    /// within the DSO. Equivalent to default visibility with object file formats that don't support
+    /// overriding exported symbols by another DSO.
     Protected,
+}
+
+impl From<SymbolVisibility> for Visibility {
+    fn from(value: SymbolVisibility) -> Self {
+        match value {
+            SymbolVisibility::Hidden => Visibility::Hidden,
+            SymbolVisibility::Protected => Visibility::Protected,
+            SymbolVisibility::Interposable => Visibility::Default,
+        }
+    }
 }
 
 impl<'tcx> CodegenUnit<'tcx> {
@@ -314,13 +351,11 @@ impl<'tcx> CodegenUnit<'tcx> {
         self.primary = true;
     }
 
-    /// The order of these items is non-determinstic.
-    pub fn items(&self) -> &FxHashMap<MonoItem<'tcx>, MonoItemData> {
+    pub fn items(&self) -> &FxIndexMap<MonoItem<'tcx>, MonoItemData> {
         &self.items
     }
 
-    /// The order of these items is non-determinstic.
-    pub fn items_mut(&mut self) -> &mut FxHashMap<MonoItem<'tcx>, MonoItemData> {
+    pub fn items_mut(&mut self) -> &mut FxIndexMap<MonoItem<'tcx>, MonoItemData> {
         &mut self.items
     }
 
@@ -333,14 +368,11 @@ impl<'tcx> CodegenUnit<'tcx> {
         self.is_code_coverage_dead_code_cgu = true;
     }
 
-    pub fn mangle_name(human_readable_name: &str) -> String {
-        // We generate a 80 bit hash from the name. This should be enough to
-        // avoid collisions and is still reasonably short for filenames.
+    pub fn mangle_name(human_readable_name: &str) -> BaseNString {
         let mut hasher = StableHasher::new();
         human_readable_name.hash(&mut hasher);
         let hash: Hash128 = hasher.finish();
-        let hash = hash.as_u128() & ((1u128 << 80) - 1);
-        base_n::encode(hash, base_n::CASE_INSENSITIVE)
+        hash.as_u128().to_base_fixed_len(CASE_INSENSITIVE)
     }
 
     pub fn compute_size_estimate(&mut self) {
@@ -382,7 +414,7 @@ impl<'tcx> CodegenUnit<'tcx> {
         // The codegen tests rely on items being process in the same order as
         // they appear in the file, so for local items, we sort by node_id first
         #[derive(PartialEq, Eq, PartialOrd, Ord)]
-        pub struct ItemSortKey<'tcx>(Option<usize>, SymbolName<'tcx>);
+        struct ItemSortKey<'tcx>(Option<usize>, SymbolName<'tcx>);
 
         fn item_sort_key<'tcx>(tcx: TyCtxt<'tcx>, item: MonoItem<'tcx>) -> ItemSortKey<'tcx> {
             ItemSortKey(
@@ -393,17 +425,19 @@ impl<'tcx> CodegenUnit<'tcx> {
                             // instances into account. The others don't matter for
                             // the codegen tests and can even make item order
                             // unstable.
-                            InstanceDef::Item(def) => def.as_local().map(Idx::index),
-                            InstanceDef::VTableShim(..)
-                            | InstanceDef::ReifyShim(..)
-                            | InstanceDef::Intrinsic(..)
-                            | InstanceDef::FnPtrShim(..)
-                            | InstanceDef::Virtual(..)
-                            | InstanceDef::ClosureOnceShim { .. }
-                            | InstanceDef::DropGlue(..)
-                            | InstanceDef::CloneShim(..)
-                            | InstanceDef::ThreadLocalShim(..)
-                            | InstanceDef::FnPtrAddrShim(..) => None,
+                            InstanceKind::Item(def) => def.as_local().map(Idx::index),
+                            InstanceKind::VTableShim(..)
+                            | InstanceKind::ReifyShim(..)
+                            | InstanceKind::Intrinsic(..)
+                            | InstanceKind::FnPtrShim(..)
+                            | InstanceKind::Virtual(..)
+                            | InstanceKind::ClosureOnceShim { .. }
+                            | InstanceKind::ConstructCoroutineInClosureShim { .. }
+                            | InstanceKind::DropGlue(..)
+                            | InstanceKind::CloneShim(..)
+                            | InstanceKind::ThreadLocalShim(..)
+                            | InstanceKind::FnPtrAddrShim(..)
+                            | InstanceKind::AsyncDropGlueCtorShim(..) => None,
                         }
                     }
                     MonoItem::Static(def_id) => def_id.as_local().map(Idx::index),
@@ -423,38 +457,19 @@ impl<'tcx> CodegenUnit<'tcx> {
     }
 }
 
-impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for CodegenUnit<'tcx> {
-    fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
-        let CodegenUnit {
-            ref items,
-            name,
-            // The size estimate is not relevant to the hash
-            size_estimate: _,
-            primary: _,
-            is_code_coverage_dead_code_cgu,
-        } = *self;
+impl ToStableHashKey<StableHashingContext<'_>> for CodegenUnit<'_> {
+    type KeyType = String;
 
-        name.hash_stable(hcx, hasher);
-        is_code_coverage_dead_code_cgu.hash_stable(hcx, hasher);
-
-        let mut items: Vec<(Fingerprint, _)> = items
-            .iter()
-            .map(|(mono_item, &attrs)| {
-                let mut hasher = StableHasher::new();
-                mono_item.hash_stable(hcx, &mut hasher);
-                let mono_item_fingerprint = hasher.finish();
-                (mono_item_fingerprint, attrs)
-            })
-            .collect();
-
-        items.sort_unstable_by_key(|i| i.0);
-        items.hash_stable(hcx, hasher);
+    fn to_stable_hash_key(&self, _: &StableHashingContext<'_>) -> Self::KeyType {
+        // Codegen unit names are conceptually required to be stable across
+        // compilation session so that object file names match up.
+        self.name.to_string()
     }
 }
 
 pub struct CodegenUnitNameBuilder<'tcx> {
     tcx: TyCtxt<'tcx>,
-    cache: FxHashMap<CrateNum, String>,
+    cache: UnordMap<CrateNum, String>,
 }
 
 impl<'tcx> CodegenUnitNameBuilder<'tcx> {
@@ -549,4 +564,22 @@ impl<'tcx> CodegenUnitNameBuilder<'tcx> {
 
         Symbol::intern(&cgu_name)
     }
+}
+
+/// See module-level docs of `rustc_monomorphize::collector` on some context for "mentioned" items.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, HashStable)]
+pub enum CollectionMode {
+    /// Collect items that are used, i.e., actually needed for codegen.
+    ///
+    /// Which items are used can depend on optimization levels, as MIR optimizations can remove
+    /// uses.
+    UsedItems,
+    /// Collect items that are mentioned. The goal of this mode is that it is independent of
+    /// optimizations: the set of "mentioned" items is computed before optimizations are run.
+    ///
+    /// The exact contents of this set are *not* a stable guarantee. (For instance, it is currently
+    /// computed after drop-elaboration. If we ever do some optimizations even in debug builds, we
+    /// might decide to run them before computing mentioned items.) The key property of this set is
+    /// that it is optimization-independent.
+    MentionedItems,
 }

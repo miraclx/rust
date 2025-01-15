@@ -1,43 +1,30 @@
+use std::ops::Deref;
+
+use field_offset::FieldOffset;
+use rustc_data_structures::sync::{AtomicU64, WorkerLocal};
+use rustc_hir::def_id::{DefId, LocalDefId};
+use rustc_hir::hir_id::OwnerId;
+use rustc_macros::HashStable;
+use rustc_query_system::HandleCycleError;
+use rustc_query_system::dep_graph::{DepNodeIndex, SerializedDepNodeIndex};
+pub(crate) use rustc_query_system::query::QueryJobId;
+use rustc_query_system::query::*;
+use rustc_span::{DUMMY_SP, ErrorGuaranteed, Span};
+
 use crate::dep_graph;
 use crate::dep_graph::DepKind;
-use crate::query::on_disk_cache::CacheEncoder;
-use crate::query::on_disk_cache::EncodedDepNodeIndex;
-use crate::query::on_disk_cache::OnDiskCache;
+use crate::query::on_disk_cache::{CacheEncoder, EncodedDepNodeIndex, OnDiskCache};
 use crate::query::{
     DynamicQueries, ExternProviders, Providers, QueryArenas, QueryCaches, QueryEngine, QueryStates,
 };
 use crate::ty::TyCtxt;
-use field_offset::FieldOffset;
-use measureme::StringId;
-use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::sync::AtomicU64;
-use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{DefId, LocalDefId};
-use rustc_hir::hir_id::OwnerId;
-use rustc_query_system::dep_graph::DepNodeIndex;
-use rustc_query_system::dep_graph::SerializedDepNodeIndex;
-pub(crate) use rustc_query_system::query::QueryJobId;
-use rustc_query_system::query::*;
-use rustc_query_system::HandleCycleError;
-use rustc_span::{ErrorGuaranteed, Span, DUMMY_SP};
-use std::ops::Deref;
-
-pub struct QueryKeyStringCache {
-    pub def_id_cache: FxHashMap<DefId, StringId>,
-}
-
-impl QueryKeyStringCache {
-    pub fn new() -> QueryKeyStringCache {
-        QueryKeyStringCache { def_id_cache: Default::default() }
-    }
-}
 
 pub struct DynamicQuery<'tcx, C: QueryCache> {
     pub name: &'static str,
     pub eval_always: bool,
     pub dep_kind: DepKind,
     pub handle_cycle_error: HandleCycleError,
-    pub query_state: FieldOffset<QueryStates<'tcx>, QueryState<C::Key, DepKind>>,
+    pub query_state: FieldOffset<QueryStates<'tcx>, QueryState<C::Key>>,
     pub query_cache: FieldOffset<QueryCaches<'tcx>, C>,
     pub cache_on_disk: fn(tcx: TyCtxt<'tcx>, key: &C::Key) -> bool,
     pub execute_query: fn(tcx: TyCtxt<'tcx>, k: C::Key) -> C::Value,
@@ -53,25 +40,25 @@ pub struct DynamicQuery<'tcx, C: QueryCache> {
         fn(tcx: TyCtxt<'tcx>, key: &C::Key, index: SerializedDepNodeIndex) -> bool,
     pub hash_result: HashResult<C::Value>,
     pub value_from_cycle_error:
-        fn(tcx: TyCtxt<'tcx>, cycle: &[QueryInfo<DepKind>], guar: ErrorGuaranteed) -> C::Value,
+        fn(tcx: TyCtxt<'tcx>, cycle_error: &CycleError, guar: ErrorGuaranteed) -> C::Value,
     pub format_value: fn(&C::Value) -> String,
 }
 
-pub struct QuerySystemFns<'tcx> {
+pub struct QuerySystemFns {
     pub engine: QueryEngine,
     pub local_providers: Providers,
     pub extern_providers: ExternProviders,
-    pub encode_query_results: fn(
+    pub encode_query_results: for<'tcx> fn(
         tcx: TyCtxt<'tcx>,
         encoder: &mut CacheEncoder<'_, 'tcx>,
         query_result_index: &mut EncodedDepNodeIndex,
     ),
-    pub try_mark_green: fn(tcx: TyCtxt<'tcx>, dep_node: &dep_graph::DepNode) -> bool,
+    pub try_mark_green: for<'tcx> fn(tcx: TyCtxt<'tcx>, dep_node: &dep_graph::DepNode) -> bool,
 }
 
 pub struct QuerySystem<'tcx> {
     pub states: QueryStates<'tcx>,
-    pub arenas: QueryArenas<'tcx>,
+    pub arenas: WorkerLocal<QueryArenas<'tcx>>,
     pub caches: QueryCaches<'tcx>,
     pub dynamic_queries: DynamicQueries<'tcx>,
 
@@ -79,9 +66,9 @@ pub struct QuerySystem<'tcx> {
     /// Do not access this directly. It is only meant to be used by
     /// `DepGraph::try_mark_green()` and the query infrastructure.
     /// This is `None` if we are not incremental compilation mode
-    pub on_disk_cache: Option<OnDiskCache<'tcx>>,
+    pub on_disk_cache: Option<OnDiskCache>,
 
-    pub fns: QuerySystemFns<'tcx>,
+    pub fns: QuerySystemFns,
 
     pub jobs: AtomicU64,
 }
@@ -173,6 +160,47 @@ pub fn query_ensure<'tcx, Cache>(
     }
 }
 
+#[inline]
+pub fn query_ensure_error_guaranteed<'tcx, Cache, T>(
+    tcx: TyCtxt<'tcx>,
+    execute_query: fn(TyCtxt<'tcx>, Span, Cache::Key, QueryMode) -> Option<Cache::Value>,
+    query_cache: &Cache,
+    key: Cache::Key,
+    check_cache: bool,
+) -> Result<(), ErrorGuaranteed>
+where
+    Cache: QueryCache<Value = super::erase::Erase<Result<T, ErrorGuaranteed>>>,
+    Result<T, ErrorGuaranteed>: EraseType,
+{
+    let key = key.into_query_param();
+    if let Some(res) = try_get_cached(tcx, query_cache, &key) {
+        super::erase::restore(res).map(drop)
+    } else {
+        execute_query(tcx, DUMMY_SP, key, QueryMode::Ensure { check_cache })
+            .map(super::erase::restore)
+            .map(|res| res.map(drop))
+            // Either we actually executed the query, which means we got a full `Result`,
+            // or we can just assume the query succeeded, because it was green in the
+            // incremental cache. If it is green, that means that the previous compilation
+            // that wrote to the incremental cache compiles successfully. That is only
+            // possible if the cache entry was `Ok(())`, so we emit that here, without
+            // actually encoding the `Result` in the cache or loading it from there.
+            .unwrap_or(Ok(()))
+    }
+}
+
+macro_rules! query_ensure {
+    ([]$($args:tt)*) => {
+        query_ensure($($args)*)
+    };
+    ([(ensure_forwards_result_if_red) $($rest:tt)*]$($args:tt)*) => {
+        query_ensure_error_guaranteed($($args)*).map(|_| ())
+    };
+    ([$other:tt $($modifiers:tt)*]$($args:tt)*) => {
+        query_ensure!([$($modifiers)*]$($args)*)
+    };
+}
+
 macro_rules! query_helper_param_ty {
     (DefId) => { impl IntoQueryParam<DefId> };
     (LocalDefId) => { impl IntoQueryParam<LocalDefId> };
@@ -220,18 +248,24 @@ macro_rules! separate_provide_extern_decl {
     };
 }
 
+macro_rules! ensure_result {
+    ([][$ty:ty]) => {
+        ()
+    };
+    ([(ensure_forwards_result_if_red) $($rest:tt)*][$ty:ty]) => {
+        Result<(), ErrorGuaranteed>
+    };
+    ([$other:tt $($modifiers:tt)*][$($args:tt)*]) => {
+        ensure_result!([$($modifiers)*][$($args)*])
+    };
+}
+
 macro_rules! separate_provide_extern_default {
     ([][$name:ident]) => {
         ()
     };
     ([(separate_provide_extern) $($rest:tt)*][$name:ident]) => {
-        |_, key| bug!(
-            "`tcx.{}({:?})` unsupported by its crate; \
-             perhaps the `{}` query was never assigned a provider function",
-            stringify!($name),
-            key,
-            stringify!($name),
-        )
+        |_, key| $crate::query::plumbing::default_extern_query(stringify!($name), &key)
     };
     ([$other:tt $($modifiers:tt)*][$($args:tt)*]) => {
         separate_provide_extern_default!([$($modifiers)*][$($args)*])
@@ -283,14 +317,13 @@ macro_rules! define_callbacks {
                     ))
                 }
 
-                pub type Storage<'tcx> = <
-                    <$($K)* as keys::Key>::CacheSelector as CacheSelector<'tcx, Erase<$V>>
-                >::Cache;
+                pub type Storage<'tcx> = <$($K)* as keys::Key>::Cache<Erase<$V>>;
 
-                // Ensure that keys grow no larger than 64 bytes
-                #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+                // Ensure that keys grow no larger than 80 bytes by accident.
+                // Increase this limit if necessary, but do try to keep the size low if possible
+                #[cfg(target_pointer_width = "64")]
                 const _: () = {
-                    if mem::size_of::<Key<'static>>() > 64 {
+                    if mem::size_of::<Key<'static>>() > 88 {
                         panic!("{}", concat!(
                             "the query `",
                             stringify!($name),
@@ -301,8 +334,10 @@ macro_rules! define_callbacks {
                     }
                 };
 
-                // Ensure that values grow no larger than 64 bytes
-                #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+                // Ensure that values grow no larger than 64 bytes by accident.
+                // Increase this limit if necessary, but do try to keep the size low if possible
+                #[cfg(target_pointer_width = "64")]
+                #[cfg(not(feature = "rustc_randomized_layouts"))]
                 const _: () = {
                     if mem::size_of::<Value<'static>>() > 64 {
                         panic!("{}", concat!(
@@ -319,7 +354,7 @@ macro_rules! define_callbacks {
 
         pub struct QueryArenas<'tcx> {
             $($(#[$attr])* pub $name: query_if_arena!([$($modifiers)*]
-                (WorkerLocal<TypedArena<<$V as Deref>::Target>>)
+                (TypedArena<<$V as Deref>::Target>)
                 ()
             ),)*
         }
@@ -328,7 +363,7 @@ macro_rules! define_callbacks {
             fn default() -> Self {
                 Self {
                     $($name: query_if_arena!([$($modifiers)*]
-                        (WorkerLocal::new(|_| Default::default()))
+                        (Default::default())
                         ()
                     ),)*
                 }
@@ -343,14 +378,15 @@ macro_rules! define_callbacks {
         impl<'tcx> TyCtxtEnsure<'tcx> {
             $($(#[$attr])*
             #[inline(always)]
-            pub fn $name(self, key: query_helper_param_ty!($($K)*)) {
-                query_ensure(
+            pub fn $name(self, key: query_helper_param_ty!($($K)*)) -> ensure_result!([$($modifiers)*][$V]) {
+                query_ensure!(
+                    [$($modifiers)*]
                     self.tcx,
                     self.tcx.query_system.fns.engine.$name,
                     &self.tcx.query_system.caches.$name,
                     key.into_query_param(),
                     false,
-                );
+                )
             })*
         }
 
@@ -402,7 +438,7 @@ macro_rules! define_callbacks {
         #[derive(Default)]
         pub struct QueryStates<'tcx> {
             $(
-                pub $name: QueryState<$($K)*, DepKind>,
+                pub $name: QueryState<$($K)*>,
             )*
         }
 
@@ -420,15 +456,7 @@ macro_rules! define_callbacks {
         impl Default for Providers {
             fn default() -> Self {
                 Providers {
-                    $($name: |_, key| bug!(
-                        "`tcx.{}({:?})` is not supported for this key;\n\
-                        hint: Queries can be either made to the local crate, or the external crate. \
-                        This error means you tried to use it for one that's not supported.\n\
-                        If that's not the case, {} was likely never assigned to a provider function.\n",
-                        stringify!($name),
-                        key,
-                        stringify!($name),
-                    ),)*
+                    $($name: |_, key| $crate::query::plumbing::default_query(stringify!($name), &key)),*
                 }
             }
         }
@@ -499,7 +527,7 @@ macro_rules! define_feedable {
                                 // We have an inconsistency. This can happen if one of the two
                                 // results is tainted by errors. In this case, delay a bug to
                                 // ensure compilation is doomed, and keep the `old` value.
-                                tcx.sess.delay_span_bug(DUMMY_SP, format!(
+                                tcx.dcx().delayed_bug(format!(
                                     "Trying to feed an already recorded value for query {} key={key:?}:\n\
                                     old value: {old:?}\nnew value: {value:?}",
                                     stringify!($name),
@@ -516,11 +544,10 @@ macro_rules! define_feedable {
                         }
                     }
                     None => {
-                        let dep_node = dep_graph::DepNode::construct(tcx, dep_graph::DepKind::$name, &key);
+                        let dep_node = dep_graph::DepNode::construct(tcx, dep_graph::dep_kinds::$name, &key);
                         let dep_node_index = tcx.dep_graph.with_feed_task(
                             dep_node,
                             tcx,
-                            key,
                             &value,
                             hash_result!([$($modifiers)*]),
                         );
@@ -545,8 +572,9 @@ macro_rules! define_feedable {
 // as they will raise an fatal error on query cycles instead.
 
 mod sealed {
-    use super::{DefId, LocalDefId, OwnerId};
     use rustc_hir::def_id::{LocalModDefId, ModDefId};
+
+    use super::{DefId, LocalDefId, OwnerId};
 
     /// An analogue of the `Into` trait that's intended only for query parameters.
     ///
@@ -615,21 +643,25 @@ mod sealed {
 
 pub use sealed::IntoQueryParam;
 
-impl<'tcx> TyCtxt<'tcx> {
-    pub fn def_kind(self, def_id: impl IntoQueryParam<DefId>) -> DefKind {
-        let def_id = def_id.into_query_param();
-        self.opt_def_kind(def_id)
-            .unwrap_or_else(|| bug!("def_kind: unsupported node: {:?}", def_id))
-    }
-}
-
-impl<'tcx> TyCtxtAt<'tcx> {
-    pub fn def_kind(self, def_id: impl IntoQueryParam<DefId>) -> DefKind {
-        let def_id = def_id.into_query_param();
-        self.opt_def_kind(def_id)
-            .unwrap_or_else(|| bug!("def_kind: unsupported node: {:?}", def_id))
-    }
-}
+use super::erase::EraseType;
 
 #[derive(Copy, Clone, Debug, HashStable)]
 pub struct CyclePlaceholder(pub ErrorGuaranteed);
+
+#[cold]
+pub(crate) fn default_query(name: &str, key: &dyn std::fmt::Debug) -> ! {
+    bug!(
+        "`tcx.{name}({key:?})` is not supported for this key;\n\
+        hint: Queries can be either made to the local crate, or the external crate. \
+        This error means you tried to use it for one that's not supported.\n\
+        If that's not the case, {name} was likely never assigned to a provider function.\n",
+    )
+}
+
+#[cold]
+pub(crate) fn default_extern_query(name: &str, key: &dyn std::fmt::Debug) -> ! {
+    bug!(
+        "`tcx.{name}({key:?})` unsupported by its crate; \
+         perhaps the `{name}` query was never assigned a provider function",
+    )
+}

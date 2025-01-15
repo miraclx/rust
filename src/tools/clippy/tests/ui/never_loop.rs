@@ -1,4 +1,4 @@
-#![feature(inline_const)]
+#![feature(try_blocks)]
 #![allow(
     clippy::eq_op,
     clippy::single_match,
@@ -337,15 +337,75 @@ pub fn test26() {
 
 pub fn test27() {
     loop {
-        //~^ ERROR: this loop never actually loops
         'label: {
             let x = true;
-            // Lints because we cannot prove it's always `true`
             if x {
                 break 'label;
             }
             return;
         }
+    }
+}
+
+// issue 11004
+pub fn test29() {
+    loop {
+        'label: {
+            if true {
+                break 'label;
+            }
+            return;
+        }
+    }
+}
+
+pub fn test30() {
+    'a: loop {
+        'b: {
+            for j in 0..2 {
+                if j == 1 {
+                    break 'b;
+                }
+            }
+            break 'a;
+        }
+    }
+}
+
+pub fn test31(b: bool) {
+    'a: loop {
+        'b: {
+            'c: loop {
+                //~^ ERROR: this loop never actually loops
+                if b { break 'c } else { break 'b }
+            }
+            continue 'a;
+        }
+        break 'a;
+    }
+}
+
+pub fn test32() {
+    loop {
+        //~^ ERROR: this loop never actually loops
+        panic!("oh no");
+    }
+    loop {
+        //~^ ERROR: this loop never actually loops
+        unimplemented!("not yet");
+    }
+    loop {
+        // no error
+        todo!("maybe later");
+    }
+}
+
+pub fn issue12205() -> Option<()> {
+    loop {
+        let _: Option<_> = try {
+            None?;
+            return Some(());
+        };
     }
 }
 

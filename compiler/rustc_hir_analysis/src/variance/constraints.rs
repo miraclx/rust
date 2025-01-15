@@ -1,18 +1,19 @@
 //! Constraint construction and representation
 //!
-//! The second pass over the AST determines the set of constraints.
+//! The second pass over the HIR determines the set of constraints.
 //! We walk the set of items and, for each member, generate new constraints.
 
 use hir::def_id::{DefId, LocalDefId};
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
-use rustc_middle::ty::{GenericArgKind, GenericArgsRef};
+use rustc_middle::ty::{self, GenericArgKind, GenericArgsRef, Ty, TyCtxt};
+use rustc_middle::{bug, span_bug};
+use tracing::{debug, instrument};
 
 use super::terms::VarianceTerm::*;
 use super::terms::*;
 
-pub struct ConstraintContext<'a, 'tcx> {
+pub(crate) struct ConstraintContext<'a, 'tcx> {
     pub terms_cx: TermsContext<'a, 'tcx>,
 
     // These are pointers to common `ConstantTerm` instances
@@ -27,7 +28,7 @@ pub struct ConstraintContext<'a, 'tcx> {
 /// Declares that the variable `decl_id` appears in a location with
 /// variance `variance`.
 #[derive(Copy, Clone)]
-pub struct Constraint<'a> {
+pub(crate) struct Constraint<'a> {
     pub inferred: InferredIndex,
     pub variance: &'a VarianceTerm<'a>,
 }
@@ -41,11 +42,11 @@ pub struct Constraint<'a> {
 /// ```
 /// then while we are visiting `Bar<T>`, the `CurrentItem` would have
 /// the `DefId` and the start of `Foo`'s inferreds.
-pub struct CurrentItem {
+struct CurrentItem {
     inferred_start: InferredIndex,
 }
 
-pub fn add_constraints_from_crate<'a, 'tcx>(
+pub(crate) fn add_constraints_from_crate<'a, 'tcx>(
     terms_cx: TermsContext<'a, 'tcx>,
 ) -> ConstraintContext<'a, 'tcx> {
     let tcx = terms_cx.tcx;
@@ -78,9 +79,7 @@ pub fn add_constraints_from_crate<'a, 'tcx>(
                 }
             }
             DefKind::Fn | DefKind::AssocFn => constraint_cx.build_constraints_for_item(def_id),
-            DefKind::TyAlias { lazy }
-                if lazy || tcx.type_of(def_id).instantiate_identity().has_opaque_types() =>
-            {
+            DefKind::TyAlias if tcx.type_alias_is_lazy(def_id) => {
                 constraint_cx.build_constraints_for_item(def_id)
             }
             _ => {}
@@ -100,7 +99,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
         debug!("build_constraints_for_item({})", tcx.def_path_str(def_id));
 
         // Skip items with no generics - there's nothing to infer in them.
-        if tcx.generics_of(def_id).count() == 0 {
+        if tcx.generics_of(def_id).is_empty() {
             return;
         }
 
@@ -110,8 +109,8 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
 
         // The type as returned by `type_of` is the underlying type and generally not a weak projection.
         // Therefore we need to check the `DefKind` first.
-        if let DefKind::TyAlias { lazy } = tcx.def_kind(def_id)
-            && (lazy || ty.has_opaque_types())
+        if let DefKind::TyAlias = tcx.def_kind(def_id)
+            && tcx.type_alias_is_lazy(def_id)
         {
             self.add_constraints_from_ty(current_item, ty, self.covariant);
             return;
@@ -237,8 +236,8 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 // leaf type -- noop
             }
 
-            ty::FnDef(..) | ty::Generator(..) | ty::Closure(..) => {
-                bug!("Unexpected closure type in variance computation");
+            ty::FnDef(..) | ty::Coroutine(..) | ty::Closure(..) | ty::CoroutineClosure(..) => {
+                bug!("Unexpected unnameable type in variance computation: {ty}");
             }
 
             ty::Ref(region, ty, mutbl) => {
@@ -251,12 +250,26 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 self.add_constraints_from_ty(current, typ, variance);
             }
 
+            ty::Pat(typ, pat) => {
+                match *pat {
+                    ty::PatternKind::Range { start, end, include_end: _ } => {
+                        if let Some(start) = start {
+                            self.add_constraints_from_const(current, start, variance);
+                        }
+                        if let Some(end) = end {
+                            self.add_constraints_from_const(current, end, variance);
+                        }
+                    }
+                }
+                self.add_constraints_from_ty(current, typ, variance);
+            }
+
             ty::Slice(typ) => {
                 self.add_constraints_from_ty(current, typ, variance);
             }
 
-            ty::RawPtr(ref mt) => {
-                self.add_constraints_from_mt(current, mt, variance);
+            ty::RawPtr(ty, mutbl) => {
+                self.add_constraints_from_mt(current, &ty::TypeAndMut { ty, mutbl }, variance);
             }
 
             ty::Tuple(subtys) => {
@@ -305,8 +318,13 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 self.add_constraint(current, data.index, variance);
             }
 
-            ty::FnPtr(sig) => {
-                self.add_constraints_from_sig(current, sig, variance);
+            ty::FnPtr(sig_tys, hdr) => {
+                self.add_constraints_from_sig(current, sig_tys.with(hdr), variance);
+            }
+
+            ty::UnsafeBinder(ty) => {
+                // FIXME(unsafe_binders): This is covariant, right?
+                self.add_constraints_from_ty(current, ty.skip_binder(), variance);
             }
 
             ty::Error(_) => {
@@ -314,11 +332,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 // types, where we use Error as the Self type
             }
 
-            ty::Placeholder(..)
-            | ty::GeneratorWitness(..)
-            | ty::GeneratorWitnessMIR(..)
-            | ty::Bound(..)
-            | ty::Infer(..) => {
+            ty::Placeholder(..) | ty::CoroutineWitness(..) | ty::Bound(..) | ty::Infer(..) => {
                 bug!("unexpected type encountered in variance inference: {}", ty);
             }
         }
@@ -419,20 +433,22 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
         variance: VarianceTermPtr<'a>,
     ) {
         match *region {
-            ty::ReEarlyBound(ref data) => {
+            ty::ReEarlyParam(ref data) => {
                 self.add_constraint(current, data.index, variance);
             }
 
             ty::ReStatic => {}
 
-            ty::ReLateBound(..) => {
-                // Late-bound regions do not get substituted the same
-                // way early-bound regions do, so we skip them here.
+            ty::ReBound(..) => {
+                // Either a higher-ranked region inside of a type or a
+                // late-bound function parameter.
+                //
+                // We do not compute constraints for either of these.
             }
 
             ty::ReError(_) => {}
 
-            ty::ReFree(..) | ty::ReVar(..) | ty::RePlaceholder(..) | ty::ReErased => {
+            ty::ReLateParam(..) | ty::ReVar(..) | ty::RePlaceholder(..) | ty::ReErased => {
                 // We don't expect to see anything but 'static or bound
                 // regions when visiting member types or method types.
                 bug!(

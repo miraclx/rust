@@ -30,8 +30,8 @@ several major phases:
 The type checker is defined into various submodules which are documented
 independently:
 
-- astconv: converts the AST representation of types
-  into the `ty` representation.
+- hir_ty_lowering: lowers type-system entities from the [HIR][hir] to the
+  [`rustc_middle::ty`] representation.
 
 - collect: computes the types of each top-level item and enters them into
   the `tcx.types` table for later use.
@@ -55,36 +55,35 @@ This API is completely unstable and subject to change.
 
 */
 
-#![allow(rustc::potential_query_instability)]
+// tidy-alphabetical-start
+#![allow(internal_features)]
+#![allow(rustc::diagnostic_outside_of_impl)]
+#![allow(rustc::untranslatable_diagnostic)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![feature(box_patterns)]
-#![feature(control_flow_enum)]
+#![doc(rust_logo)]
+#![feature(assert_matches)]
+#![feature(coroutines)]
 #![feature(if_let_guard)]
-#![feature(is_sorted)]
+#![feature(iter_from_coroutine)]
 #![feature(iter_intersperse)]
 #![feature(let_chains)]
-#![feature(min_specialization)]
 #![feature(never_type)]
-#![feature(lazy_cell)]
+#![feature(rustdoc_internals)]
 #![feature(slice_partition_dedup)]
 #![feature(try_blocks)]
-#![feature(type_alias_impl_trait)]
-#![recursion_limit = "256"]
-
-#[macro_use]
-extern crate tracing;
-
-#[macro_use]
-extern crate rustc_middle;
+#![feature(unwrap_infallible)]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
 // These are used by Clippy.
 pub mod check;
 
-pub mod astconv;
 pub mod autoderef;
 mod bounds;
 mod check_unused;
 mod coherence;
+mod delegation;
+pub mod hir_ty_lowering;
 // FIXME: This module shouldn't be public.
 pub mod collect;
 mod constrained_generic_params;
@@ -92,84 +91,30 @@ mod errors;
 pub mod hir_wf_check;
 mod impl_wf_check;
 mod outlives;
-pub mod structured_errors;
 mod variance;
 
-use rustc_errors::ErrorGuaranteed;
-use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
-use rustc_fluent_macro::fluent_messages;
+use rustc_abi::ExternAbi;
 use rustc_hir as hir;
-use rustc_infer::infer::TyCtxtInferExt;
-use rustc_middle::middle;
-use rustc_middle::query::Providers;
-use rustc_middle::ty::{self, Ty, TyCtxt};
-use rustc_middle::util;
-use rustc_session::parse::feature_err;
-use rustc_span::{symbol::sym, Span, DUMMY_SP};
-use rustc_target::spec::abi::Abi;
-use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt as _;
-use rustc_trait_selection::traits::{self, ObligationCause, ObligationCtxt};
-
-use astconv::{AstConv, OnlySelfBounds};
-use bounds::Bounds;
 use rustc_hir::def::DefKind;
+use rustc_middle::middle;
+use rustc_middle::mir::interpret::GlobalId;
+use rustc_middle::query::Providers;
+use rustc_middle::ty::{self, Const, Ty, TyCtxt};
+use rustc_span::Span;
+use rustc_trait_selection::traits;
 
-fluent_messages! { "../messages.ftl" }
+use self::hir_ty_lowering::{FeedConstTy, HirTyLowerer};
 
-fn require_c_abi_if_c_variadic(tcx: TyCtxt<'_>, decl: &hir::FnDecl<'_>, abi: Abi, span: Span) {
-    const CONVENTIONS_UNSTABLE: &str = "`C`, `cdecl`, `win64`, `sysv64` or `efiapi`";
-    const CONVENTIONS_STABLE: &str = "`C` or `cdecl`";
-    const UNSTABLE_EXPLAIN: &str =
-        "using calling conventions other than `C` or `cdecl` for varargs functions is unstable";
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
-    if !decl.c_variadic || matches!(abi, Abi::C { .. } | Abi::Cdecl { .. }) {
-        return;
-    }
-
-    let extended_abi_support = tcx.features().extended_varargs_abi_support;
-    let conventions = match (extended_abi_support, abi.supports_varargs()) {
-        // User enabled additional ABI support for varargs and function ABI matches those ones.
-        (true, true) => return,
-
-        // Using this ABI would be ok, if the feature for additional ABI support was enabled.
-        // Return CONVENTIONS_STABLE, because we want the other error to look the same.
-        (false, true) => {
-            feature_err(
-                &tcx.sess.parse_sess,
-                sym::extended_varargs_abi_support,
-                span,
-                UNSTABLE_EXPLAIN,
-            )
-            .emit();
-            CONVENTIONS_STABLE
-        }
-
-        (false, false) => CONVENTIONS_STABLE,
-        (true, false) => CONVENTIONS_UNSTABLE,
-    };
-
-    tcx.sess.emit_err(errors::VariadicFunctionCompatibleConvention { span, conventions });
-}
-
-fn require_same_types<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    cause: &ObligationCause<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
-    expected: Ty<'tcx>,
-    actual: Ty<'tcx>,
+fn require_c_abi_if_c_variadic(
+    tcx: TyCtxt<'_>,
+    decl: &hir::FnDecl<'_>,
+    abi: ExternAbi,
+    span: Span,
 ) {
-    let infcx = &tcx.infer_ctxt().build();
-    let ocx = ObligationCtxt::new(infcx);
-    match ocx.eq(cause, param_env, expected, actual) {
-        Ok(()) => {
-            let errors = ocx.select_all_or_error();
-            if !errors.is_empty() {
-                infcx.err_ctxt().report_fulfillment_errors(&errors);
-            }
-        }
-        Err(err) => {
-            infcx.err_ctxt().report_mismatched_types(cause, expected, actual, err).emit();
-        }
+    if decl.c_variadic && !abi.supports_varargs() {
+        tcx.dcx().emit_err(errors::VariadicFunctionCompatibleConvention { span });
     }
 }
 
@@ -180,61 +125,53 @@ pub fn provide(providers: &mut Providers) {
     check_unused::provide(providers);
     variance::provide(providers);
     outlives::provide(providers);
-    impl_wf_check::provide(providers);
     hir_wf_check::provide(providers);
+    *providers = Providers {
+        inherit_sig_for_delegation_item: delegation::inherit_sig_for_delegation_item,
+        enforce_impl_non_lifetime_params_are_constrained:
+            impl_wf_check::enforce_impl_non_lifetime_params_are_constrained,
+        ..*providers
+    };
 }
 
-pub fn check_crate(tcx: TyCtxt<'_>) -> Result<(), ErrorGuaranteed> {
+pub fn check_crate(tcx: TyCtxt<'_>) {
     let _prof_timer = tcx.sess.timer("type_check_crate");
 
-    // this ensures that later parts of type checking can assume that items
-    // have valid types and not error
-    // FIXME(matthewjasper) We shouldn't need to use `track_errors`.
-    tcx.sess.track_errors(|| {
-        tcx.sess.time("type_collecting", || {
-            tcx.hir().for_each_module(|module| tcx.ensure().collect_mod_item_types(module))
+    tcx.sess.time("coherence_checking", || {
+        tcx.hir().par_for_each_module(|module| {
+            let _ = tcx.ensure().check_mod_type_wf(module);
         });
-    })?;
 
-    if tcx.features().rustc_attrs {
-        tcx.sess.track_errors(|| {
-            tcx.sess.time("outlives_testing", || outlives::test::test_inferred_outlives(tcx));
-        })?;
+        for &trait_def_id in tcx.all_local_trait_impls(()).keys() {
+            let _ = tcx.ensure().coherent_trait(trait_def_id);
+        }
+        // these queries are executed for side-effects (error reporting):
+        let _ = tcx.ensure().crate_inherent_impls_validity_check(());
+        let _ = tcx.ensure().crate_inherent_impls_overlap_check(());
+    });
+
+    if tcx.features().rustc_attrs() {
+        tcx.sess.time("outlives_dumping", || outlives::dump::inferred_outlives(tcx));
+        tcx.sess.time("variance_dumping", || variance::dump::variances(tcx));
+        collect::dump::opaque_hidden_types(tcx);
+        collect::dump::predicates_and_item_bounds(tcx);
+        collect::dump::def_parents(tcx);
     }
 
-    tcx.sess.track_errors(|| {
-        tcx.sess.time("impl_wf_inference", || {
-            tcx.hir().for_each_module(|module| tcx.ensure().check_mod_impl_wf(module))
-        });
-    })?;
-
-    tcx.sess.track_errors(|| {
-        tcx.sess.time("coherence_checking", || {
-            for &trait_def_id in tcx.all_local_trait_impls(()).keys() {
-                tcx.ensure().coherent_trait(trait_def_id);
+    // Make sure we evaluate all static and (non-associated) const items, even if unused.
+    // If any of these fail to evaluate, we do not want this crate to pass compilation.
+    tcx.hir().par_body_owners(|item_def_id| {
+        let def_kind = tcx.def_kind(item_def_id);
+        match def_kind {
+            DefKind::Static { .. } => tcx.ensure().eval_static_initializer(item_def_id),
+            DefKind::Const if tcx.generics_of(item_def_id).is_empty() => {
+                let instance = ty::Instance::new(item_def_id.into(), ty::GenericArgs::empty());
+                let cid = GlobalId { instance, promoted: None };
+                let typing_env = ty::TypingEnv::fully_monomorphized();
+                tcx.ensure().eval_to_const_value_raw(typing_env.as_query_input(cid));
             }
-
-            // these queries are executed for side-effects (error reporting):
-            tcx.ensure().crate_inherent_impls(());
-            tcx.ensure().crate_inherent_impls_overlap_check(());
-        });
-    })?;
-
-    if tcx.features().rustc_attrs {
-        tcx.sess.track_errors(|| {
-            tcx.sess.time("variance_testing", || variance::test::test_variance(tcx));
-        })?;
-    }
-
-    tcx.sess.track_errors(|| {
-        tcx.sess.time("wf_checking", || {
-            tcx.hir().par_for_each_module(|module| tcx.ensure().check_mod_type_wf(module))
-        });
-    })?;
-
-    // NOTE: This is copy/pasted in librustdoc/core.rs and should be kept in sync.
-    tcx.sess.time("item_types_checking", || {
-        tcx.hir().for_each_module(|module| tcx.ensure().check_mod_item_types(module))
+            _ => (),
+        }
     });
 
     // FIXME: Remove this when we implement creating `DefId`s
@@ -249,42 +186,33 @@ pub fn check_crate(tcx: TyCtxt<'_>) -> Result<(), ErrorGuaranteed> {
     });
 
     tcx.ensure().check_unused_traits(());
-
-    if let Some(reported) = tcx.sess.has_errors() { Err(reported) } else { Ok(()) }
 }
 
-/// A quasi-deprecated helper used in rustdoc and clippy to get
-/// the type from a HIR node.
-pub fn hir_ty_to_ty<'tcx>(tcx: TyCtxt<'tcx>, hir_ty: &hir::Ty<'_>) -> Ty<'tcx> {
+/// Lower a [`hir::Ty`] to a [`Ty`].
+///
+/// <div class="warning">
+///
+/// This function is **quasi-deprecated**. It can cause ICEs if called inside of a body
+/// (of a function or constant) and especially if it contains inferred types (`_`).
+///
+/// It's used in rustdoc and Clippy.
+///
+/// </div>
+pub fn lower_ty<'tcx>(tcx: TyCtxt<'tcx>, hir_ty: &hir::Ty<'tcx>) -> Ty<'tcx> {
     // In case there are any projections, etc., find the "environment"
     // def-ID that will be used to determine the traits/predicates in
     // scope. This is derived from the enclosing item-like thing.
     let env_def_id = tcx.hir().get_parent_item(hir_ty.hir_id);
-    let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id.def_id);
-    item_cx.astconv().ast_ty_to_ty(hir_ty)
+    collect::ItemCtxt::new(tcx, env_def_id.def_id).lower_ty(hir_ty)
 }
 
-pub fn hir_trait_to_predicates<'tcx>(
+/// This is for rustdoc.
+// FIXME(const_generics): having special methods for rustdoc in `rustc_hir_analysis` is cursed
+pub fn lower_const_arg_for_rustdoc<'tcx>(
     tcx: TyCtxt<'tcx>,
-    hir_trait: &hir::TraitRef<'_>,
-    self_ty: Ty<'tcx>,
-) -> Bounds<'tcx> {
-    // In case there are any projections, etc., find the "environment"
-    // def-ID that will be used to determine the traits/predicates in
-    // scope. This is derived from the enclosing item-like thing.
-    let env_def_id = tcx.hir().get_parent_item(hir_trait.hir_ref_id);
-    let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id.def_id);
-    let mut bounds = Bounds::default();
-    let _ = &item_cx.astconv().instantiate_poly_trait_ref(
-        hir_trait,
-        DUMMY_SP,
-        ty::BoundConstness::NotConst,
-        ty::ImplPolarity::Positive,
-        self_ty,
-        &mut bounds,
-        true,
-        OnlySelfBounds(false),
-    );
-
-    bounds
+    hir_ct: &hir::ConstArg<'tcx>,
+    feed: FeedConstTy,
+) -> Const<'tcx> {
+    let env_def_id = tcx.hir().get_parent_item(hir_ct.hir_id);
+    collect::ItemCtxt::new(tcx, env_def_id.def_id).lowerer().lower_const_arg(hir_ct, feed)
 }

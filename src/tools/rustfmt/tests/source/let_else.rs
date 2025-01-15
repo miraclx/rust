@@ -117,8 +117,8 @@ fn unbreakable_initializer_expr_pre_formatting_length_through_initializer_expr_n
     // Break after the `=` and put the initializer expr on it's own line.
     // Because the initializer expr is multi-lined the else is placed on it's own line.
     // The initializer expr has a length of 91, which when indented on the next line
-    // The `(indent)init` line has a lengh of 99. This is the max length that the `init` can be
-    // before we start running into max_width issues. I suspect this is becuase the shape is
+    // The `(indent)init` line has a length of 99. This is the max length that the `init` can be
+    // before we start running into max_width issues. I suspect this is because the shape is
     // accounting for the `;` at the end of the `let-else` statement.
     let Some(x) = some_really_really_really_really_really_really_really_really_really_really_long_name______I else {return};
 
@@ -127,7 +127,7 @@ fn unbreakable_initializer_expr_pre_formatting_length_through_initializer_expr_n
     // Post Formatting:
     // Max length issues prevent us from formatting.
     // The initializer expr has a length of 92, which if it would be indented on the next line
-    // the `(indent)init` line has a lengh of 100 which == max_width of 100.
+    // the `(indent)init` line has a length of 100 which == max_width of 100.
     // One might expect formatting to succeed, but I suspect the reason we hit max_width issues is
     // because the Shape is accounting for the `;` at the end of the `let-else` statement.
     let Some(x) = some_really_really_really_really_really_really_really_really_really_really_really_long_nameJ else {return};
@@ -159,4 +159,24 @@ fn with_trailing_try_operator() {
 
     // Maybe this is a workaround?
     let Ok(Some(next_bucket)) = ranking_rules[cur_ranking_rule_index].next_bucket(ctx, logger, &ranking_rule_universes[cur_ranking_rule_index]) else { return };
+}
+
+fn issue5901() {
+    #[cfg(target_os = "linux")]
+    let Some(x) = foo else { todo!() };
+
+    #[cfg(target_os = "linux")]
+    // Some comments between attributes and let-else statement
+    let Some(x) = foo else { todo!() };
+
+    #[cfg(target_os = "linux")]
+    #[cfg(target_arch = "x86_64")]
+    let Some(x) = foo else { todo!() };
+
+    // The else block will be multi-lined because attributes and comments before `let`
+    // are included when calculating max width
+    #[cfg(target_os = "linux")]
+    #[cfg(target_arch = "x86_64")]
+    // Some comments between attributes and let-else statement
+    let Some(x) = foo() else { todo!() };
 }

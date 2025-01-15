@@ -3,14 +3,13 @@ use std::io;
 use std::os::windows::prelude::*;
 use std::path::Path;
 
-use windows::{
-    Win32::Foundation::{ERROR_INVALID_FUNCTION, HANDLE},
-    Win32::Storage::FileSystem::{
-        LockFileEx, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, LOCKFILE_EXCLUSIVE_LOCK,
-        LOCKFILE_FAIL_IMMEDIATELY, LOCK_FILE_FLAGS,
-    },
-    Win32::System::IO::OVERLAPPED,
+use tracing::debug;
+use windows::Win32::Foundation::{ERROR_INVALID_FUNCTION, HANDLE};
+use windows::Win32::Storage::FileSystem::{
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, LOCK_FILE_FLAGS, LOCKFILE_EXCLUSIVE_LOCK,
+    LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
 };
+use windows::Win32::System::IO::OVERLAPPED;
 
 #[derive(Debug)]
 pub struct Lock {
@@ -69,7 +68,6 @@ impl Lock {
                 &mut overlapped,
             )
         }
-        .ok()
         .map_err(|e| {
             let err = io::Error::from_raw_os_error(e.code().0);
             debug!("failed acquiring file lock: {}", err);

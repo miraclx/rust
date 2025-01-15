@@ -1,4 +1,4 @@
-// compile-flags:-g
+//@ compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 
@@ -10,9 +10,8 @@
 // === LLDB TESTS ==================================================================================
 
 // lldb-command:run
-// lldb-command:print a
-// lldbg-check:(regression_bad_location_list_67992::Foo) $0 = [...]
-// lldbr-check:(regression_bad_location_list_67992::Foo) a = [...]
+// lldb-command:v a
+// lldb-check:(regression_bad_location_list_67992::Foo) [...]
 
 const ARRAY_SIZE: usize = 1024;
 

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 #![warn(clippy::transmute_null_to_fn)]
-#![allow(clippy::zero_ptr)]
+#![allow(clippy::zero_ptr, clippy::missing_transmute_annotations)]
 
 // Easy to lint because these only span one line.
 fn one_liners() {
@@ -22,6 +22,17 @@ fn transmute_const() {
         //~^ ERROR: transmuting a known null pointer into a function pointer
         // Should NOT raise a lint.
         let _: fn() = std::mem::transmute(NOT_ZPTR);
+    }
+}
+
+fn issue_11485() {
+    unsafe {
+        let _: fn() = std::mem::transmute(0 as *const u8 as *const ());
+        //~^ ERROR: transmuting a known null pointer into a function pointer
+        let _: fn() = std::mem::transmute(std::ptr::null::<()>() as *const u8);
+        //~^ ERROR: transmuting a known null pointer into a function pointer
+        let _: fn() = std::mem::transmute(ZPTR as *const u8);
+        //~^ ERROR: transmuting a known null pointer into a function pointer
     }
 }
 

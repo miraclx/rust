@@ -3,11 +3,10 @@ mod strategy {
     mod grisu;
 }
 
-use core::num::flt2dec::MAX_SIG_DIGITS;
-use core::num::flt2dec::{decode, DecodableFloat, Decoded, FullDecoded};
+use core::num::flt2dec::{DecodableFloat, Decoded, FullDecoded, MAX_SIG_DIGITS, decode};
 use std::io::Write;
-use std::vec::Vec;
-use test::{black_box, Bencher};
+
+use test::{Bencher, black_box};
 
 pub fn decode_finite<T: DecodableFloat>(v: T) -> Decoded {
     match decode(v).1 {

@@ -1,5 +1,9 @@
+use rustc_macros::HashStable;
+use smallvec::SmallVec;
+use tracing::instrument;
+
 use crate::ty::context::TyCtxt;
-use crate::ty::{self, DefId, ParamEnv, Ty};
+use crate::ty::{self, DefId, OpaqueTypeKey, Ty, TypingEnv};
 
 /// Represents whether some type is inhabited in a given context.
 /// Examples of uninhabited types are `!`, `enum Void {}`, or a struct
@@ -21,6 +25,8 @@ pub enum InhabitedPredicate<'tcx> {
     /// Inhabited if some generic type is inhabited.
     /// These are replaced by calling [`Self::instantiate`].
     GenericType(Ty<'tcx>),
+    /// Inhabited if either we don't know the hidden type or we know it and it is inhabited.
+    OpaqueType(OpaqueTypeKey<'tcx>),
     /// A AND B
     And(&'tcx [InhabitedPredicate<'tcx>; 2]),
     /// A OR B
@@ -28,36 +34,63 @@ pub enum InhabitedPredicate<'tcx> {
 }
 
 impl<'tcx> InhabitedPredicate<'tcx> {
-    /// Returns true if the corresponding type is inhabited in the given
-    /// `ParamEnv` and module
-    pub fn apply(self, tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>, module_def_id: DefId) -> bool {
-        let Ok(result) = self
-            .apply_inner::<!>(tcx, param_env, &|id| Ok(tcx.is_descendant_of(module_def_id, id)));
+    /// Returns true if the corresponding type is inhabited in the given `ParamEnv` and module.
+    pub fn apply(
+        self,
+        tcx: TyCtxt<'tcx>,
+        typing_env: TypingEnv<'tcx>,
+        module_def_id: DefId,
+    ) -> bool {
+        self.apply_revealing_opaque(tcx, typing_env, module_def_id, &|_| None)
+    }
+
+    /// Returns true if the corresponding type is inhabited in the given `ParamEnv` and module,
+    /// revealing opaques when possible.
+    pub fn apply_revealing_opaque(
+        self,
+        tcx: TyCtxt<'tcx>,
+        typing_env: TypingEnv<'tcx>,
+        module_def_id: DefId,
+        reveal_opaque: &impl Fn(OpaqueTypeKey<'tcx>) -> Option<Ty<'tcx>>,
+    ) -> bool {
+        let Ok(result) = self.apply_inner::<!>(
+            tcx,
+            typing_env,
+            &mut Default::default(),
+            &|id| Ok(tcx.is_descendant_of(module_def_id, id)),
+            reveal_opaque,
+        );
         result
     }
 
     /// Same as `apply`, but returns `None` if self contains a module predicate
-    pub fn apply_any_module(self, tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>) -> Option<bool> {
-        self.apply_inner(tcx, param_env, &|_| Err(())).ok()
+    pub fn apply_any_module(self, tcx: TyCtxt<'tcx>, typing_env: TypingEnv<'tcx>) -> Option<bool> {
+        self.apply_inner(tcx, typing_env, &mut Default::default(), &|_| Err(()), &|_| None).ok()
     }
 
     /// Same as `apply`, but `NotInModule(_)` predicates yield `false`. That is,
     /// privately uninhabited types are considered always uninhabited.
-    pub fn apply_ignore_module(self, tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>) -> bool {
-        let Ok(result) = self.apply_inner::<!>(tcx, param_env, &|_| Ok(true));
+    pub fn apply_ignore_module(self, tcx: TyCtxt<'tcx>, typing_env: TypingEnv<'tcx>) -> bool {
+        let Ok(result) =
+            self.apply_inner::<!>(tcx, typing_env, &mut Default::default(), &|_| Ok(true), &|_| {
+                None
+            });
         result
     }
 
-    fn apply_inner<E>(
+    #[instrument(level = "debug", skip(tcx, typing_env, in_module, reveal_opaque), ret)]
+    fn apply_inner<E: std::fmt::Debug>(
         self,
         tcx: TyCtxt<'tcx>,
-        param_env: ParamEnv<'tcx>,
+        typing_env: TypingEnv<'tcx>,
+        eval_stack: &mut SmallVec<[Ty<'tcx>; 1]>, // for cycle detection
         in_module: &impl Fn(DefId) -> Result<bool, E>,
+        reveal_opaque: &impl Fn(OpaqueTypeKey<'tcx>) -> Option<Ty<'tcx>>,
     ) -> Result<bool, E> {
         match self {
             Self::False => Ok(false),
             Self::True => Ok(true),
-            Self::ConstIsZero(const_) => match const_.try_eval_target_usize(tcx, param_env) {
+            Self::ConstIsZero(const_) => match const_.try_to_target_usize(tcx) {
                 None | Some(0) => Ok(true),
                 Some(1..) => Ok(false),
             },
@@ -66,16 +99,53 @@ impl<'tcx> InhabitedPredicate<'tcx> {
             // we have a param_env available, we can do better.
             Self::GenericType(t) => {
                 let normalized_pred = tcx
-                    .try_normalize_erasing_regions(param_env, t)
+                    .try_normalize_erasing_regions(typing_env, t)
                     .map_or(self, |t| t.inhabited_predicate(tcx));
                 match normalized_pred {
                     // We don't have more information than we started with, so consider inhabited.
                     Self::GenericType(_) => Ok(true),
-                    pred => pred.apply_inner(tcx, param_env, in_module),
+                    pred => {
+                        // A type which is cyclic when monomorphized can happen here since the
+                        // layout error would only trigger later. See e.g. `tests/ui/sized/recursive-type-2.rs`.
+                        if eval_stack.contains(&t) {
+                            return Ok(true); // Recover; this will error later.
+                        }
+                        eval_stack.push(t);
+                        let ret =
+                            pred.apply_inner(tcx, typing_env, eval_stack, in_module, reveal_opaque);
+                        eval_stack.pop();
+                        ret
+                    }
                 }
             }
-            Self::And([a, b]) => try_and(a, b, |x| x.apply_inner(tcx, param_env, in_module)),
-            Self::Or([a, b]) => try_or(a, b, |x| x.apply_inner(tcx, param_env, in_module)),
+            Self::OpaqueType(key) => match reveal_opaque(key) {
+                // Unknown opaque is assumed inhabited.
+                None => Ok(true),
+                // Known opaque type is inspected recursively.
+                Some(t) => {
+                    // A cyclic opaque type can happen in corner cases that would only error later.
+                    // See e.g. `tests/ui/type-alias-impl-trait/recursive-tait-conflicting-defn.rs`.
+                    if eval_stack.contains(&t) {
+                        return Ok(true); // Recover; this will error later.
+                    }
+                    eval_stack.push(t);
+                    let ret = t.inhabited_predicate(tcx).apply_inner(
+                        tcx,
+                        typing_env,
+                        eval_stack,
+                        in_module,
+                        reveal_opaque,
+                    );
+                    eval_stack.pop();
+                    ret
+                }
+            },
+            Self::And([a, b]) => try_and(a, b, |x| {
+                x.apply_inner(tcx, typing_env, eval_stack, in_module, reveal_opaque)
+            }),
+            Self::Or([a, b]) => try_or(a, b, |x| {
+                x.apply_inner(tcx, typing_env, eval_stack, in_module, reveal_opaque)
+            }),
         }
     }
 
@@ -197,7 +267,7 @@ impl<'tcx> InhabitedPredicate<'tcx> {
 
 // this is basically like `f(a)? && f(b)?` but different in the case of
 // `Ok(false) && Err(_) -> Ok(false)`
-fn try_and<T, E>(a: T, b: T, f: impl Fn(T) -> Result<bool, E>) -> Result<bool, E> {
+fn try_and<T, E>(a: T, b: T, mut f: impl FnMut(T) -> Result<bool, E>) -> Result<bool, E> {
     let a = f(a);
     if matches!(a, Ok(false)) {
         return Ok(false);
@@ -209,7 +279,7 @@ fn try_and<T, E>(a: T, b: T, f: impl Fn(T) -> Result<bool, E>) -> Result<bool, E
     }
 }
 
-fn try_or<T, E>(a: T, b: T, f: impl Fn(T) -> Result<bool, E>) -> Result<bool, E> {
+fn try_or<T, E>(a: T, b: T, mut f: impl FnMut(T) -> Result<bool, E>) -> Result<bool, E> {
     let a = f(a);
     if matches!(a, Ok(true)) {
         return Ok(true);

@@ -1,4 +1,5 @@
-use ide_db::syntax_helpers::insert_whitespace_into_node::insert_ws_into;
+use hir::db::ExpandDatabase;
+use ide_db::syntax_helpers::prettify_macro_expansion;
 use syntax::ast::{self, AstNode};
 
 use crate::{AssistContext, AssistId, AssistKind, Assists};
@@ -36,12 +37,20 @@ use crate::{AssistContext, AssistId, AssistKind, Assists};
 // ```
 pub(crate) fn inline_macro(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     let unexpanded = ctx.find_node_at_offset::<ast::MacroCall>()?;
-    let expanded = insert_ws_into(ctx.sema.expand(&unexpanded)?.clone_for_update());
+    let macro_call = ctx.sema.to_def(&unexpanded)?;
+    let expanded = ctx.sema.parse_or_expand(macro_call.as_file());
+    let span_map = ctx.sema.db.expansion_span_map(macro_call.as_macro_file());
+    let expanded = prettify_macro_expansion(
+        ctx.db(),
+        expanded,
+        &span_map,
+        ctx.sema.file_to_module_def(ctx.file_id())?.krate().into(),
+    );
     let text_range = unexpanded.syntax().text_range();
 
     acc.add(
         AssistId("inline_macro", AssistKind::RefactorInline),
-        format!("Inline macro"),
+        "Inline macro".to_owned(),
         text_range,
         |builder| builder.replace(text_range, expanded.to_string()),
     )
@@ -288,12 +297,81 @@ macro_rules! foo {
 }
 fn main() {
     cfg_if!{
-  if #[cfg(test)]{
-    1;
-  }else {
-    1;
-  }
+    if #[cfg(test)]{
+        1;
+    }else {
+        1;
+    }
 };
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn dollar_crate() {
+        check_assist(
+            inline_macro,
+            r#"
+pub struct Foo;
+#[macro_export]
+macro_rules! m {
+    () => { $crate::Foo };
+}
+fn bar() {
+    m$0!();
+}
+"#,
+            r#"
+pub struct Foo;
+#[macro_export]
+macro_rules! m {
+    () => { $crate::Foo };
+}
+fn bar() {
+    crate::Foo;
+}
+"#,
+        );
+        check_assist(
+            inline_macro,
+            r#"
+//- /a.rs crate:a
+pub struct Foo;
+#[macro_export]
+macro_rules! m {
+    () => { $crate::Foo };
+}
+//- /b.rs crate:b deps:a
+fn bar() {
+    a::m$0!();
+}
+"#,
+            r#"
+fn bar() {
+    a::Foo;
+}
+"#,
+        );
+        check_assist(
+            inline_macro,
+            r#"
+//- /a.rs crate:a
+pub struct Foo;
+#[macro_export]
+macro_rules! m {
+    () => { $crate::Foo };
+}
+//- /b.rs crate:b deps:a
+pub use a::m;
+//- /c.rs crate:c deps:b
+fn bar() {
+    b::m$0!();
+}
+"#,
+            r#"
+fn bar() {
+    a::Foo;
 }
 "#,
         );

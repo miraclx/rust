@@ -1,11 +1,10 @@
-use super::*;
-
-use crate::collections::hash_map::DefaultHasher;
-use crate::collections::{BTreeSet, HashSet};
-use crate::hash::Hasher;
-use crate::rc::Rc;
-use crate::sync::Arc;
 use core::hint::black_box;
+
+use super::*;
+use crate::collections::{BTreeSet, HashSet};
+use crate::hash::DefaultHasher;
+use crate::mem::MaybeUninit;
+use crate::ptr;
 
 #[allow(unknown_lints, unused_macro_rules)]
 macro_rules! t (
@@ -130,7 +129,17 @@ fn into() {
 }
 
 #[test]
-#[cfg(unix)]
+fn test_pathbuf_leak() {
+    let string = "/have/a/cake".to_owned();
+    let (len, cap) = (string.len(), string.capacity());
+    let buf = PathBuf::from(string);
+    let leaked = buf.leak();
+    assert_eq!(leaked.as_os_str().as_encoded_bytes(), b"/have/a/cake");
+    unsafe { drop(String::from_raw_parts(leaked.as_mut_os_str() as *mut OsStr as _, len, cap)) }
+}
+
+#[test]
+#[cfg(any(unix, target_os = "wasi"))]
 pub fn test_decompositions_unix() {
     t!("",
     iter: [],
@@ -1192,7 +1201,10 @@ pub fn test_push() {
         });
     );
 
-    if cfg!(unix) || cfg!(all(target_env = "sgx", target_vendor = "fortanix")) {
+    if cfg!(unix)
+        || cfg!(target_os = "wasi")
+        || cfg!(all(target_env = "sgx", target_vendor = "fortanix"))
+    {
         tp!("", "foo", "foo");
         tp!("foo", "bar", "foo/bar");
         tp!("foo/", "bar", "foo/bar");
@@ -1349,7 +1361,10 @@ pub fn test_set_file_name() {
     tfn!("foo", "bar", "bar");
     tfn!("foo", "", "");
     tfn!("", "foo", "foo");
-    if cfg!(unix) || cfg!(all(target_env = "sgx", target_vendor = "fortanix")) {
+    if cfg!(unix)
+        || cfg!(target_os = "wasi")
+        || cfg!(all(target_env = "sgx", target_vendor = "fortanix"))
+    {
         tfn!(".", "foo", "./foo");
         tfn!("foo/", "bar", "bar");
         tfn!("foo/.", "bar", "bar");
@@ -1395,6 +1410,37 @@ pub fn test_set_extension() {
 }
 
 #[test]
+pub fn test_add_extension() {
+    macro_rules! tfe (
+        ($path:expr, $ext:expr, $expected:expr, $output:expr) => ({
+            let mut p = PathBuf::from($path);
+            let output = p.add_extension($ext);
+            assert!(p.to_str() == Some($expected) && output == $output,
+                    "adding extension of {:?} to {:?}: Expected {:?}/{:?}, got {:?}/{:?}",
+                    $path, $ext, $expected, $output,
+                    p.to_str().unwrap(), output);
+        });
+    );
+
+    tfe!("foo", "txt", "foo.txt", true);
+    tfe!("foo.bar", "txt", "foo.bar.txt", true);
+    tfe!("foo.bar.baz", "txt", "foo.bar.baz.txt", true);
+    tfe!(".test", "txt", ".test.txt", true);
+    tfe!("foo.txt", "", "foo.txt", true);
+    tfe!("foo", "", "foo", true);
+    tfe!("", "foo", "", false);
+    tfe!(".", "foo", ".", false);
+    tfe!("foo/", "bar", "foo.bar", true);
+    tfe!("foo/.", "bar", "foo.bar", true);
+    tfe!("..", "foo", "..", false);
+    tfe!("foo/..", "bar", "foo/..", false);
+    tfe!("/", "foo", "/", false);
+
+    // edge cases
+    tfe!("/foo.ext////", "bar", "/foo.ext.bar", true);
+}
+
+#[test]
 pub fn test_with_extension() {
     macro_rules! twe (
         ($input:expr, $extension:expr, $expected:expr) => ({
@@ -1435,6 +1481,49 @@ pub fn test_with_extension() {
 }
 
 #[test]
+pub fn test_with_added_extension() {
+    macro_rules! twe (
+        ($input:expr, $extension:expr, $expected:expr) => ({
+            let input = Path::new($input);
+            let output = input.with_added_extension($extension);
+
+            assert!(
+                output.to_str() == Some($expected),
+                "calling Path::new({:?}).with_added_extension({:?}): Expected {:?}, got {:?}",
+                $input, $extension, $expected, output,
+            );
+        });
+    );
+
+    twe!("foo", "txt", "foo.txt");
+    twe!("foo.bar", "txt", "foo.bar.txt");
+    twe!("foo.bar.baz", "txt", "foo.bar.baz.txt");
+    twe!(".test", "txt", ".test.txt");
+    twe!("foo.txt", "", "foo.txt");
+    twe!("foo", "", "foo");
+    twe!("", "foo", "");
+    twe!(".", "foo", ".");
+    twe!("foo/", "bar", "foo.bar");
+    twe!("foo/.", "bar", "foo.bar");
+    twe!("..", "foo", "..");
+    twe!("foo/..", "bar", "foo/..");
+    twe!("/", "foo", "/");
+
+    // edge cases
+    twe!("/foo.ext////", "bar", "/foo.ext.bar");
+
+    // New extension is smaller than file name
+    twe!("aaa_aaa_aaa", "bbb_bbb", "aaa_aaa_aaa.bbb_bbb");
+    // New extension is greater than file name
+    twe!("bbb_bbb", "aaa_aaa_aaa", "bbb_bbb.aaa_aaa_aaa");
+
+    // New extension is smaller than previous extension
+    twe!("ccc.aaa_aaa_aaa", "bbb_bbb", "ccc.aaa_aaa_aaa.bbb_bbb");
+    // New extension is greater than previous extension
+    twe!("ccc.bbb_bbb", "aaa_aaa_aaa", "ccc.bbb_bbb.aaa_aaa_aaa");
+}
+
+#[test]
 fn test_eq_receivers() {
     use crate::borrow::Cow;
 
@@ -1461,8 +1550,7 @@ fn test_eq_receivers() {
 
 #[test]
 pub fn test_compare() {
-    use crate::collections::hash_map::DefaultHasher;
-    use crate::hash::{Hash, Hasher};
+    use crate::hash::{DefaultHasher, Hash, Hasher};
 
     fn hash<T: Hash>(t: T) -> u64 {
         let mut s = DefaultHasher::new();
@@ -1539,6 +1627,20 @@ pub fn test_compare() {
     relative_from: Some("")
     );
 
+    tc!("foo//", "foo",
+    eq: true,
+    starts_with: true,
+    ends_with: true,
+    relative_from: Some("")
+    );
+
+    tc!("foo///", "foo",
+    eq: true,
+    starts_with: true,
+    ends_with: true,
+    relative_from: Some("")
+    );
+
     tc!("foo/.", "foo",
     eq: true,
     starts_with: true,
@@ -1553,11 +1655,32 @@ pub fn test_compare() {
     relative_from: Some("")
     );
 
+    tc!("foo/.//bar", "foo/bar",
+    eq: true,
+    starts_with: true,
+    ends_with: true,
+    relative_from: Some("")
+    );
+
+    tc!("foo//./bar", "foo/bar",
+    eq: true,
+    starts_with: true,
+    ends_with: true,
+    relative_from: Some("")
+    );
+
     tc!("foo/bar", "foo",
     eq: false,
     starts_with: true,
     ends_with: false,
     relative_from: Some("bar")
+    );
+
+    tc!("foo/bar", "foobar",
+    eq: false,
+    starts_with: false,
+    ends_with: false,
+    relative_from: None
     );
 
     tc!("foo/bar/baz", "foo/bar",
@@ -1641,7 +1764,7 @@ fn test_components_debug() {
     assert_eq!(expected, actual);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "wasi"))]
 #[test]
 fn test_iter_debug() {
     let path = Path::new("/tmp");
@@ -1742,7 +1865,7 @@ fn test_ord() {
 }
 
 #[test]
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "wasi"))]
 fn test_unix_absolute() {
     use crate::path::absolute;
 
@@ -1805,6 +1928,29 @@ fn test_windows_absolute() {
         Path::new(r"C:\path..\to\file").as_os_str()
     );
     assert_eq!(absolute(r"COM1").unwrap().as_os_str(), Path::new(r"\\.\COM1").as_os_str());
+}
+
+#[test]
+#[should_panic = "path separator"]
+fn test_extension_path_sep() {
+    let mut path = PathBuf::from("path/to/file");
+    path.set_extension("d/../../../../../etc/passwd");
+}
+
+#[test]
+#[should_panic = "path separator"]
+#[cfg(windows)]
+fn test_extension_path_sep_alternate() {
+    let mut path = PathBuf::from("path/to/file");
+    path.set_extension("d\\test");
+}
+
+#[test]
+#[cfg(not(windows))]
+fn test_extension_path_sep_alternate() {
+    let mut path = PathBuf::from("path/to/file");
+    path.set_extension("d\\test");
+    assert_eq!(path, Path::new("path/to/file.d\\test"));
 }
 
 #[bench]
@@ -1915,4 +2061,19 @@ fn bench_hash_path_long(b: &mut test::Bencher) {
     b.iter(|| black_box(path).hash(&mut hasher));
 
     black_box(hasher.finish());
+}
+
+#[test]
+fn clone_to_uninit() {
+    let a = Path::new("hello.txt");
+
+    let mut storage = vec![MaybeUninit::<u8>::uninit(); size_of_val::<Path>(a)];
+    unsafe { a.clone_to_uninit(ptr::from_mut::<[_]>(storage.as_mut_slice()).cast()) };
+    assert_eq!(a.as_os_str().as_encoded_bytes(), unsafe { storage.assume_init_ref() });
+
+    let mut b: Box<Path> = Path::new("world.exe").into();
+    assert_eq!(size_of_val::<Path>(a), size_of_val::<Path>(&b));
+    assert_ne!(a, &*b);
+    unsafe { a.clone_to_uninit(ptr::from_mut::<Path>(&mut b).cast()) };
+    assert_eq!(a, &*b);
 }

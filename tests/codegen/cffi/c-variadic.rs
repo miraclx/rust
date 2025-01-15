@@ -1,10 +1,9 @@
-// ignore-wasm32-bare compiled with panic=abort by default
-// compile-flags: -C no-prepopulate-passes -Copt-level=0
+//@ needs-unwind
+//@ compile-flags: -C no-prepopulate-passes -Copt-level=0
 //
 
 #![crate_type = "lib"]
 #![feature(c_variadic)]
-#![feature(c_unwind)]
 #![no_std]
 use core::ffi::VaList;
 

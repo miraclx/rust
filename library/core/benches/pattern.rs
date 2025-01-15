@@ -1,5 +1,4 @@
-use test::black_box;
-use test::Bencher;
+use test::{Bencher, black_box};
 
 #[bench]
 fn starts_with_char(b: &mut Bencher) {

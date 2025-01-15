@@ -1,19 +1,21 @@
-use crate::errors;
+use std::mem;
+
 use rustc_ast::ptr::P;
 use rustc_ast::visit::{self, Visitor};
-use rustc_ast::{self as ast, attr, NodeId};
+use rustc_ast::{self as ast, NodeId, attr};
 use rustc_ast_pretty::pprust;
-use rustc_expand::base::{parse_macro_name_and_helper_attrs, ExtCtxt, ResolverExpand};
+use rustc_errors::DiagCtxtHandle;
+use rustc_expand::base::{ExtCtxt, ResolverExpand, parse_macro_name_and_helper_attrs};
 use rustc_expand::expand::{AstFragment, ExpansionConfig};
 use rustc_feature::Features;
 use rustc_session::Session;
 use rustc_span::hygiene::AstPass;
 use rustc_span::source_map::SourceMap;
-use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::{DUMMY_SP, Ident, Span, Symbol, kw, sym};
 use smallvec::smallvec;
-use std::mem;
-use thin_vec::{thin_vec, ThinVec};
+use thin_vec::{ThinVec, thin_vec};
+
+use crate::errors;
 
 struct ProcMacroDerive {
     id: NodeId,
@@ -38,7 +40,7 @@ enum ProcMacro {
 struct CollectProcMacros<'a> {
     macros: Vec<ProcMacro>,
     in_root: bool,
-    handler: &'a rustc_errors::Handler,
+    dcx: DiagCtxtHandle<'a>,
     source_map: &'a SourceMap,
     is_proc_macro_crate: bool,
     is_test_crate: bool,
@@ -52,7 +54,7 @@ pub fn inject(
     is_proc_macro_crate: bool,
     has_proc_macro_decls: bool,
     is_test_crate: bool,
-    handler: &rustc_errors::Handler,
+    dcx: DiagCtxtHandle<'_>,
 ) {
     let ecfg = ExpansionConfig::default("proc_macro".to_string(), features);
     let mut cx = ExtCtxt::new(sess, ecfg, resolver, None);
@@ -60,7 +62,7 @@ pub fn inject(
     let mut collect = CollectProcMacros {
         macros: Vec::new(),
         in_root: true,
-        handler,
+        dcx,
         source_map: sess.source_map(),
         is_proc_macro_crate,
         is_test_crate,
@@ -86,13 +88,13 @@ pub fn inject(
 impl<'a> CollectProcMacros<'a> {
     fn check_not_pub_in_root(&self, vis: &ast::Visibility, sp: Span) {
         if self.is_proc_macro_crate && self.in_root && vis.kind.is_pub() {
-            self.handler.emit_err(errors::ProcMacro { span: sp });
+            self.dcx.emit_err(errors::ProcMacro { span: sp });
         }
     }
 
     fn collect_custom_derive(&mut self, item: &'a ast::Item, attr: &'a ast::Attribute) {
         let Some((trait_name, proc_attrs)) =
-            parse_macro_name_and_helper_attrs(self.handler, attr, "derive")
+            parse_macro_name_and_helper_attrs(self.dcx, attr, "derive")
         else {
             return;
         };
@@ -112,7 +114,7 @@ impl<'a> CollectProcMacros<'a> {
             } else {
                 "functions tagged with `#[proc_macro_derive]` must be `pub`"
             };
-            self.handler.span_err(self.source_map.guess_head_span(item.span), msg);
+            self.dcx.span_err(self.source_map.guess_head_span(item.span), msg);
         }
     }
 
@@ -130,7 +132,7 @@ impl<'a> CollectProcMacros<'a> {
             } else {
                 "functions tagged with `#[proc_macro_attribute]` must be `pub`"
             };
-            self.handler.span_err(self.source_map.guess_head_span(item.span), msg);
+            self.dcx.span_err(self.source_map.guess_head_span(item.span), msg);
         }
     }
 
@@ -148,7 +150,7 @@ impl<'a> CollectProcMacros<'a> {
             } else {
                 "functions tagged with `#[proc_macro]` must be `pub`"
             };
-            self.handler.span_err(self.source_map.guess_head_span(item.span), msg);
+            self.dcx.span_err(self.source_map.guess_head_span(item.span), msg);
         }
     }
 }
@@ -157,7 +159,7 @@ impl<'a> Visitor<'a> for CollectProcMacros<'a> {
     fn visit_item(&mut self, item: &'a ast::Item) {
         if let ast::ItemKind::MacroDef(..) = item.kind {
             if self.is_proc_macro_crate && attr::contains_name(&item.attrs, sym::macro_export) {
-                self.handler.emit_err(errors::ExportMacroRules {
+                self.dcx.emit_err(errors::ExportMacroRules {
                     span: self.source_map.guess_head_span(item.span),
                 });
             }
@@ -192,9 +194,9 @@ impl<'a> Visitor<'a> for CollectProcMacros<'a> {
                         )
                     };
 
-                    self.handler
+                    self.dcx
                         .struct_span_err(attr.span, msg)
-                        .span_label(prev_attr.span, "previous attribute here")
+                        .with_span_label(prev_attr.span, "previous attribute here")
                         .emit();
 
                     return;
@@ -213,12 +215,12 @@ impl<'a> Visitor<'a> for CollectProcMacros<'a> {
         };
 
         if !is_fn {
-            let msg = format!(
-                "the `#[{}]` attribute may only be used on bare functions",
-                pprust::path_to_string(&attr.get_normal_item().path),
-            );
-
-            self.handler.span_err(attr.span, msg);
+            self.dcx
+                .create_err(errors::AttributeOnlyBeUsedOnBareFunctions {
+                    span: attr.span,
+                    path: &pprust::path_to_string(&attr.get_normal_item().path),
+                })
+                .emit();
             return;
         }
 
@@ -227,12 +229,12 @@ impl<'a> Visitor<'a> for CollectProcMacros<'a> {
         }
 
         if !self.is_proc_macro_crate {
-            let msg = format!(
-                "the `#[{}]` attribute is only usable with crates of the `proc-macro` crate type",
-                pprust::path_to_string(&attr.get_normal_item().path),
-            );
-
-            self.handler.span_err(attr.span, msg);
+            self.dcx
+                .create_err(errors::AttributeOnlyUsableWithCrateType {
+                    span: attr.span,
+                    path: &pprust::path_to_string(&attr.get_normal_item().path),
+                })
+                .emit();
             return;
         }
 
@@ -299,16 +301,21 @@ fn mk_decls(cx: &mut ExtCtxt<'_>, macros: &[ProcMacro]) -> P<ast::Item> {
             };
             let local_path = |cx: &ExtCtxt<'_>, name| cx.expr_path(cx.path(span, vec![name]));
             let proc_macro_ty_method_path = |cx: &ExtCtxt<'_>, method| {
-                cx.expr_path(cx.path(
-                    span.with_ctxt(harness_span.ctxt()),
-                    vec![proc_macro, bridge, client, proc_macro_ty, method],
-                ))
+                cx.expr_path(cx.path(span.with_ctxt(harness_span.ctxt()), vec![
+                    proc_macro,
+                    bridge,
+                    client,
+                    proc_macro_ty,
+                    method,
+                ]))
             };
             match m {
                 ProcMacro::Derive(cd) => {
                     cx.resolver.declare_proc_macro(cd.id);
+                    // The call needs to use `harness_span` so that the const stability checker
+                    // accepts it.
                     cx.expr_call(
-                        span,
+                        harness_span,
                         proc_macro_ty_method_path(cx, custom_derive),
                         thin_vec![
                             cx.expr_str(span, cd.trait_name),
@@ -331,14 +338,12 @@ fn mk_decls(cx: &mut ExtCtxt<'_>, macros: &[ProcMacro]) -> P<ast::Item> {
                         ProcMacro::Derive(_) => unreachable!(),
                     };
 
-                    cx.expr_call(
-                        span,
-                        proc_macro_ty_method_path(cx, ident),
-                        thin_vec![
-                            cx.expr_str(span, ca.function_name.name),
-                            local_path(cx, ca.function_name),
-                        ],
-                    )
+                    // The call needs to use `harness_span` so that the const stability checker
+                    // accepts it.
+                    cx.expr_call(harness_span, proc_macro_ty_method_path(cx, ident), thin_vec![
+                        cx.expr_str(span, ca.function_name.name),
+                        local_path(cx, ca.function_name),
+                    ])
                 }
             }
         })
@@ -352,9 +357,12 @@ fn mk_decls(cx: &mut ExtCtxt<'_>, macros: &[ProcMacro]) -> P<ast::Item> {
                 span,
                 cx.ty(
                     span,
-                    ast::TyKind::Slice(
-                        cx.ty_path(cx.path(span, vec![proc_macro, bridge, client, proc_macro_ty])),
-                    ),
+                    ast::TyKind::Slice(cx.ty_path(cx.path(span, vec![
+                        proc_macro,
+                        bridge,
+                        client,
+                        proc_macro_ty,
+                    ]))),
                 ),
                 None,
                 ast::Mutability::Not,

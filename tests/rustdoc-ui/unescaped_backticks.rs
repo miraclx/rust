@@ -190,7 +190,7 @@ pub fn complicated_markdown() {}
 pub mod mir {}
 
 pub mod rustc {
-    /// Constructs a `TyKind::Error` type and registers a `delay_span_bug` with the given `msg to
+    /// Constructs a `TyKind::Error` type and registers a `span_delayed_bug` with the given `msg to
     //~^ ERROR unescaped backtick
     /// ensure it gets used.
     pub fn ty_error_with_message() {}
@@ -218,7 +218,7 @@ pub mod rustc {
     pub fn with_options() {}
 
     /// Subtracts `set from `row`. `set` can be either `BitSet` or
-    /// `HybridBitSet`. Has no effect if `row` does not exist.
+    /// `ChunkedBitSet`. Has no effect if `row` does not exist.
     //~^ ERROR unescaped backtick
     ///
     /// Returns true if the row was changed.

@@ -168,7 +168,26 @@ mod issue_5729 {
     impl<T: Foo + 'static> FooStorage for FooStorageImpl<T> {
         fn foo_cloned(&self) -> Arc<dyn Foo> {
             
-            Arc::clone(&self.foo) as _
+            (Arc::clone(&self.foo)) as _
+            //~^ ERROR: returning the result of a `let` binding from a block
+        }
+    }
+}
+
+mod issue_11335 {
+    pub enum E<T> {
+        A(T),
+        B(T),
+    }
+
+    impl<T> E<T> {
+        pub fn inner(&self) -> &T {
+            
+
+            (match self {
+                E::A(x) => x,
+                E::B(x) => x,
+            }) as _
             //~^ ERROR: returning the result of a `let` binding from a block
         }
     }
@@ -183,5 +202,46 @@ macro_rules! fn_in_macro {
 fn_in_macro!({
     return 1;
 });
+
+fn issue9150() -> usize {
+    let x = 1;
+    #[cfg(any())]
+    panic!("can't see me");
+    x
+}
+
+fn issue12801() {
+    fn left_is_if() -> String {
+        
+        (if true { "a".to_string() } else { "b".to_string() } + "c")
+        //~^ ERROR: returning the result of a `let` binding from a block
+    }
+
+    fn no_par_needed() -> String {
+        
+        "c".to_string() + if true { "a" } else { "b" }
+        //~^ ERROR: returning the result of a `let` binding from a block
+    }
+
+    fn conjunctive_blocks() -> String {
+        
+        ({ "a".to_string() } + "b" + { "c" } + "d")
+        //~^ ERROR: returning the result of a `let` binding from a block
+    }
+
+    #[allow(clippy::overly_complex_bool_expr)]
+    fn other_ops() {
+        let _ = || {
+            
+            (if true { 2 } else { 3 } << 4)
+            //~^ ERROR: returning the result of a `let` binding from a block
+        };
+        let _ = || {
+            
+            ({ true } || { false } && { 2 <= 3 })
+            //~^ ERROR: returning the result of a `let` binding from a block
+        };
+    }
+}
 
 fn main() {}

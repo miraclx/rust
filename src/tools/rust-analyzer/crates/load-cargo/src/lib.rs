@@ -2,23 +2,28 @@
 //! for incorporating changes.
 // Note, don't remove any public api from this. This API is consumed by external tools
 // to run rust-analyzer as a library.
-use std::{collections::hash_map::Entry, mem, path::Path, sync};
+use std::{collections::hash_map::Entry, iter, mem, path::Path, sync};
 
-use ::tt::token_id as tt;
 use crossbeam_channel::{unbounded, Receiver};
-use ide::{AnalysisHost, Change, SourceRoot};
+use hir_expand::proc_macro::{
+    ProcMacro, ProcMacroExpander, ProcMacroExpansionError, ProcMacroKind, ProcMacroLoadResult,
+    ProcMacros,
+};
 use ide_db::{
-    base_db::{
-        CrateGraph, Env, ProcMacro, ProcMacroExpander, ProcMacroExpansionError, ProcMacroKind,
-        ProcMacroLoadResult, ProcMacros,
-    },
-    FxHashMap,
+    base_db::{CrateGraph, CrateWorkspaceData, Env, SourceRoot, SourceRootId},
+    prime_caches, ChangeWithProcMacros, FxHashMap, RootDatabase,
 };
 use itertools::Itertools;
-use proc_macro_api::{MacroDylib, ProcMacroServer};
+use proc_macro_api::{MacroDylib, ProcMacroClient};
 use project_model::{CargoConfig, PackageRoot, ProjectManifest, ProjectWorkspace};
-use vfs::{file_set::FileSetConfig, loader::Handle, AbsPath, AbsPathBuf, VfsPath};
+use span::Span;
+use vfs::{
+    file_set::FileSetConfig,
+    loader::{Handle, LoadingProgress},
+    AbsPath, AbsPathBuf, VfsPath,
+};
 
+#[derive(Debug)]
 pub struct LoadCargoConfig {
     pub load_out_dirs_from_check: bool,
     pub with_proc_macro_server: ProcMacroServerChoice,
@@ -37,8 +42,8 @@ pub fn load_workspace_at(
     cargo_config: &CargoConfig,
     load_config: &LoadCargoConfig,
     progress: &dyn Fn(String),
-) -> anyhow::Result<(AnalysisHost, vfs::Vfs, Option<ProcMacroServer>)> {
-    let root = AbsPathBuf::assert(std::env::current_dir()?.join(root));
+) -> anyhow::Result<(RootDatabase, vfs::Vfs, Option<ProcMacroClient>)> {
+    let root = AbsPathBuf::assert_utf8(std::env::current_dir()?.join(root));
     let root = ProjectManifest::discover_single(&root)?;
     let mut workspace = ProjectWorkspace::load(root, cargo_config, progress)?;
 
@@ -54,24 +59,35 @@ pub fn load_workspace(
     ws: ProjectWorkspace,
     extra_env: &FxHashMap<String, String>,
     load_config: &LoadCargoConfig,
-) -> anyhow::Result<(AnalysisHost, vfs::Vfs, Option<ProcMacroServer>)> {
+) -> anyhow::Result<(RootDatabase, vfs::Vfs, Option<ProcMacroClient>)> {
     let (sender, receiver) = unbounded();
     let mut vfs = vfs::Vfs::default();
     let mut loader = {
-        let loader =
-            vfs_notify::NotifyHandle::spawn(Box::new(move |msg| sender.send(msg).unwrap()));
+        let loader = vfs_notify::NotifyHandle::spawn(sender);
         Box::new(loader)
     };
 
+    tracing::debug!(?load_config, "LoadCargoConfig");
     let proc_macro_server = match &load_config.with_proc_macro_server {
         ProcMacroServerChoice::Sysroot => ws
             .find_sysroot_proc_macro_srv()
-            .and_then(|it| ProcMacroServer::spawn(it).map_err(Into::into)),
+            .and_then(|it| ProcMacroClient::spawn(&it, extra_env).map_err(Into::into))
+            .map_err(|e| (e, true)),
         ProcMacroServerChoice::Explicit(path) => {
-            ProcMacroServer::spawn(path.clone()).map_err(Into::into)
+            ProcMacroClient::spawn(path, extra_env).map_err(Into::into).map_err(|e| (e, true))
         }
-        ProcMacroServerChoice::None => Err(anyhow::format_err!("proc macro server disabled")),
+        ProcMacroServerChoice::None => {
+            Err((anyhow::format_err!("proc macro server disabled"), false))
+        }
     };
+    match &proc_macro_server {
+        Ok(server) => {
+            tracing::info!(path=%server.server_path(), "Proc-macro server started")
+        }
+        Err((e, _)) => {
+            tracing::info!(%e, "Failed to start proc-macro server")
+        }
+    }
 
     let (crate_graph, proc_macros) = ws.to_crate_graph(
         &mut |path: &AbsPath| {
@@ -85,7 +101,7 @@ pub fn load_workspace(
     let proc_macros = {
         let proc_macro_server = match &proc_macro_server {
             Ok(it) => Ok(it),
-            Err(e) => Err(e.to_string()),
+            Err((e, hard_err)) => Err((e.to_string(), *hard_err)),
         };
         proc_macros
             .into_iter()
@@ -93,7 +109,7 @@ pub fn load_workspace(
                 (
                     crate_id,
                     path.map_or_else(
-                        |_| Err("proc macro crate is missing dylib".to_owned()),
+                        |e| Err((e, true)),
                         |(_, path)| {
                             proc_macro_server.as_ref().map_err(Clone::clone).and_then(
                                 |proc_macro_server| load_proc_macro(proc_macro_server, &path, &[]),
@@ -105,14 +121,15 @@ pub fn load_workspace(
             .collect()
     };
 
-    let project_folders = ProjectFolders::new(&[ws], &[]);
+    let project_folders = ProjectFolders::new(std::slice::from_ref(&ws), &[], None);
     loader.set_config(vfs::loader::Config {
         load: project_folders.load,
         watch: vec![],
         version: 0,
     });
 
-    let host = load_crate_graph(
+    let db = load_crate_graph(
+        &ws,
         crate_graph,
         proc_macros,
         project_folders.source_root_config,
@@ -121,9 +138,9 @@ pub fn load_workspace(
     );
 
     if load_config.prefill_caches {
-        host.analysis().parallel_prime_caches(1, |_| {})?;
+        prime_caches::parallel_prime_caches(&db, 1, &|_| ());
     }
-    Ok((host, vfs, proc_macro_server.ok()))
+    Ok((db, vfs, proc_macro_server.ok()))
 }
 
 #[derive(Default)]
@@ -134,7 +151,11 @@ pub struct ProjectFolders {
 }
 
 impl ProjectFolders {
-    pub fn new(workspaces: &[ProjectWorkspace], global_excludes: &[AbsPathBuf]) -> ProjectFolders {
+    pub fn new(
+        workspaces: &[ProjectWorkspace],
+        global_excludes: &[AbsPathBuf],
+        user_config_dir_path: Option<&AbsPath>,
+    ) -> ProjectFolders {
         let mut res = ProjectFolders::default();
         let mut fsc = FileSetConfig::builder();
         let mut local_filesets = vec![];
@@ -208,6 +229,7 @@ impl ProjectFolders {
             let entry = {
                 let mut dirs = vfs::loader::Directories::default();
                 dirs.extensions.push("rs".into());
+                dirs.extensions.push("toml".into());
                 dirs.include.extend(root.include);
                 dirs.exclude.extend(root.exclude);
                 for excl in global_excludes {
@@ -220,6 +242,9 @@ impl ProjectFolders {
                     }
                 }
 
+                if dirs.include.is_empty() {
+                    continue;
+                }
                 vfs::loader::Entry::Directories(dirs)
             };
 
@@ -229,8 +254,24 @@ impl ProjectFolders {
             res.load.push(entry);
 
             if root.is_local {
-                local_filesets.push(fsc.len());
+                local_filesets.push(fsc.len() as u64);
             }
+            fsc.add_file_set(file_set_roots)
+        }
+
+        if let Some(user_config_path) = user_config_dir_path {
+            let ratoml_path = {
+                let mut p = user_config_path.to_path_buf();
+                p.push("rust-analyzer.toml");
+                p
+            };
+
+            let file_set_roots = vec![VfsPath::from(ratoml_path.to_owned())];
+            let entry = vfs::loader::Entry::Files(vec![ratoml_path]);
+
+            res.watch.push(res.load.len());
+            res.load.push(entry);
+            local_filesets.push(fsc.len() as u64);
             fsc.add_file_set(file_set_roots)
         }
 
@@ -244,7 +285,7 @@ impl ProjectFolders {
 #[derive(Default, Debug)]
 pub struct SourceRootConfig {
     pub fsc: FileSetConfig,
-    pub local_filesets: Vec<usize>,
+    pub local_filesets: Vec<u64>,
 }
 
 impl SourceRootConfig {
@@ -254,7 +295,7 @@ impl SourceRootConfig {
             .into_iter()
             .enumerate()
             .map(|(idx, file_set)| {
-                let is_local = self.local_filesets.contains(&idx);
+                let is_local = self.local_filesets.contains(&(idx as u64));
                 if is_local {
                     SourceRoot::new_local(file_set)
                 } else {
@@ -263,24 +304,77 @@ impl SourceRootConfig {
             })
             .collect()
     }
+
+    /// Maps local source roots to their parent source roots by bytewise comparing of root paths .
+    /// If a `SourceRoot` doesn't have a parent and is local then it is not contained in this mapping but it can be asserted that it is a root `SourceRoot`.
+    pub fn source_root_parent_map(&self) -> FxHashMap<SourceRootId, SourceRootId> {
+        let roots = self.fsc.roots();
+
+        let mut map = FxHashMap::default();
+
+        // See https://github.com/rust-lang/rust-analyzer/issues/17409
+        //
+        // We can view the connections between roots as a graph. The problem is
+        // that this graph may contain cycles, so when adding edges, it is necessary
+        // to check whether it will lead to a cycle.
+        //
+        // Since we ensure that each node has at most one outgoing edge (because
+        // each SourceRoot can have only one parent), we can use a disjoint-set to
+        // maintain the connectivity between nodes. If an edge’s two nodes belong
+        // to the same set, they are already connected.
+        let mut dsu = FxHashMap::default();
+        fn find_parent(dsu: &mut FxHashMap<u64, u64>, id: u64) -> u64 {
+            if let Some(&parent) = dsu.get(&id) {
+                let parent = find_parent(dsu, parent);
+                dsu.insert(id, parent);
+                parent
+            } else {
+                id
+            }
+        }
+
+        for (idx, (root, root_id)) in roots.iter().enumerate() {
+            if !self.local_filesets.contains(root_id)
+                || map.contains_key(&SourceRootId(*root_id as u32))
+            {
+                continue;
+            }
+
+            for (root2, root2_id) in roots[..idx].iter().rev() {
+                if self.local_filesets.contains(root2_id)
+                    && root_id != root2_id
+                    && root.starts_with(root2)
+                {
+                    // check if the edge will create a cycle
+                    if find_parent(&mut dsu, *root_id) != find_parent(&mut dsu, *root2_id) {
+                        map.insert(SourceRootId(*root_id as u32), SourceRootId(*root2_id as u32));
+                        dsu.insert(*root_id, *root2_id);
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        map
+    }
 }
 
-/// Load the proc-macros for the given lib path, replacing all expanders whose names are in `dummy_replace`
-/// with an identity dummy expander.
+/// Load the proc-macros for the given lib path, disabling all expanders whose names are in `ignored_macros`.
 pub fn load_proc_macro(
-    server: &ProcMacroServer,
+    server: &ProcMacroClient,
     path: &AbsPath,
-    dummy_replace: &[Box<str>],
+    ignored_macros: &[Box<str>],
 ) -> ProcMacroLoadResult {
     let res: Result<Vec<_>, String> = (|| {
         let dylib = MacroDylib::new(path.to_path_buf());
         let vec = server.load_dylib(dylib).map_err(|e| format!("{e}"))?;
         if vec.is_empty() {
-            return Err("proc macro library returned no proc macros".to_string());
+            return Err("proc macro library returned no proc macros".to_owned());
         }
         Ok(vec
             .into_iter()
-            .map(|expander| expander_to_proc_macro(expander, dummy_replace))
+            .map(|expander| expander_to_proc_macro(expander, ignored_macros))
             .collect())
     })();
     match res {
@@ -293,33 +387,38 @@ pub fn load_proc_macro(
         }
         Err(e) => {
             tracing::warn!("proc-macro loading for {path} failed: {e}");
-            Err(e)
+            Err((e, true))
         }
     }
 }
 
 fn load_crate_graph(
+    ws: &ProjectWorkspace,
     crate_graph: CrateGraph,
     proc_macros: ProcMacros,
     source_root_config: SourceRootConfig,
     vfs: &mut vfs::Vfs,
     receiver: &Receiver<vfs::loader::Message>,
-) -> AnalysisHost {
-    let lru_cap = std::env::var("RA_LRU_CAP").ok().and_then(|it| it.parse::<usize>().ok());
-    let mut host = AnalysisHost::new(lru_cap);
-    let mut analysis_change = Change::new();
+) -> RootDatabase {
+    let ProjectWorkspace { toolchain, target_layout, .. } = ws;
 
-    host.raw_database_mut().enable_proc_attr_macros();
+    let lru_cap = std::env::var("RA_LRU_CAP").ok().and_then(|it| it.parse::<u16>().ok());
+    let mut db = RootDatabase::new(lru_cap);
+    let mut analysis_change = ChangeWithProcMacros::new();
+
+    db.enable_proc_attr_macros();
 
     // wait until Vfs has loaded all roots
     for task in receiver {
         match task {
-            vfs::loader::Message::Progress { n_done, n_total, config_version: _ } => {
-                if n_done == n_total {
+            vfs::loader::Message::Progress { n_done, .. } => {
+                if n_done == LoadingProgress::Finished {
                     break;
                 }
             }
-            vfs::loader::Message::Loaded { files } => {
+            vfs::loader::Message::Loaded { files } | vfs::loader::Message::Changed { files } => {
+                let _p =
+                    tracing::info_span!("load_cargo::load_crate_craph/LoadedChanged").entered();
                 for (path, contents) in files {
                     vfs.set_file_contents(path.into(), contents);
                 }
@@ -327,44 +426,48 @@ fn load_crate_graph(
         }
     }
     let changes = vfs.take_changes();
-    for file in changes {
-        if file.exists() {
-            let contents = vfs.file_contents(file.file_id);
-            if let Ok(text) = std::str::from_utf8(contents) {
-                analysis_change.change_file(file.file_id, Some(text.into()))
+    for (_, file) in changes {
+        if let vfs::Change::Create(v, _) | vfs::Change::Modify(v, _) = file.change {
+            if let Ok(text) = String::from_utf8(v) {
+                analysis_change.change_file(file.file_id, Some(text))
             }
         }
     }
     let source_roots = source_root_config.partition(vfs);
     analysis_change.set_roots(source_roots);
 
-    analysis_change.set_crate_graph(crate_graph);
+    let ws_data = crate_graph
+        .iter()
+        .zip(iter::repeat(From::from(CrateWorkspaceData {
+            proc_macro_cwd: None,
+            data_layout: target_layout.clone(),
+            toolchain: toolchain.clone(),
+        })))
+        .collect();
+    analysis_change.set_crate_graph(crate_graph, ws_data);
     analysis_change.set_proc_macros(proc_macros);
 
-    host.apply_change(analysis_change);
-    host
+    db.apply_change(analysis_change);
+    db
 }
 
 fn expander_to_proc_macro(
     expander: proc_macro_api::ProcMacro,
-    dummy_replace: &[Box<str>],
+    ignored_macros: &[Box<str>],
 ) -> ProcMacro {
-    let name = From::from(expander.name());
+    let name = expander.name();
     let kind = match expander.kind() {
         proc_macro_api::ProcMacroKind::CustomDerive => ProcMacroKind::CustomDerive,
-        proc_macro_api::ProcMacroKind::FuncLike => ProcMacroKind::FuncLike,
+        proc_macro_api::ProcMacroKind::Bang => ProcMacroKind::Bang,
         proc_macro_api::ProcMacroKind::Attr => ProcMacroKind::Attr,
     };
-    let expander: sync::Arc<dyn ProcMacroExpander> =
-        if dummy_replace.iter().any(|replace| &**replace == name) {
-            match kind {
-                ProcMacroKind::Attr => sync::Arc::new(IdentityExpander),
-                _ => sync::Arc::new(EmptyExpander),
-            }
-        } else {
-            sync::Arc::new(Expander(expander))
-        };
-    ProcMacro { name, kind, expander }
+    let disabled = ignored_macros.iter().any(|replace| **replace == *name);
+    ProcMacro {
+        name: intern::Symbol::intern(name),
+        kind,
+        expander: sync::Arc::new(Expander(expander)),
+        disabled,
+    }
 }
 
 #[derive(Debug)]
@@ -373,12 +476,23 @@ struct Expander(proc_macro_api::ProcMacro);
 impl ProcMacroExpander for Expander {
     fn expand(
         &self,
-        subtree: &tt::Subtree,
-        attrs: Option<&tt::Subtree>,
+        subtree: &tt::TopSubtree<Span>,
+        attrs: Option<&tt::TopSubtree<Span>>,
         env: &Env,
-    ) -> Result<tt::Subtree, ProcMacroExpansionError> {
-        let env = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        match self.0.expand(subtree, attrs, env) {
+        def_site: Span,
+        call_site: Span,
+        mixed_site: Span,
+        current_dir: Option<String>,
+    ) -> Result<tt::TopSubtree<Span>, ProcMacroExpansionError> {
+        match self.0.expand(
+            subtree.view(),
+            attrs.map(|attrs| attrs.view()),
+            env.clone().into(),
+            def_site,
+            call_site,
+            mixed_site,
+            current_dir,
+        ) {
             Ok(Ok(subtree)) => Ok(subtree),
             Ok(Err(err)) => Err(ProcMacroExpansionError::Panic(err.0)),
             Err(err) => Err(ProcMacroExpansionError::System(err.to_string())),
@@ -386,56 +500,179 @@ impl ProcMacroExpander for Expander {
     }
 }
 
-/// Dummy identity expander, used for attribute proc-macros that are deliberately ignored by the user.
-#[derive(Debug)]
-struct IdentityExpander;
-
-impl ProcMacroExpander for IdentityExpander {
-    fn expand(
-        &self,
-        subtree: &tt::Subtree,
-        _: Option<&tt::Subtree>,
-        _: &Env,
-    ) -> Result<tt::Subtree, ProcMacroExpansionError> {
-        Ok(subtree.clone())
-    }
-}
-
-/// Empty expander, used for proc-macros that are deliberately ignored by the user.
-#[derive(Debug)]
-struct EmptyExpander;
-
-impl ProcMacroExpander for EmptyExpander {
-    fn expand(
-        &self,
-        _: &tt::Subtree,
-        _: Option<&tt::Subtree>,
-        _: &Env,
-    ) -> Result<tt::Subtree, ProcMacroExpansionError> {
-        Ok(tt::Subtree::empty())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use ide_db::base_db::SourceDatabase;
+    use vfs::file_set::FileSetConfigBuilder;
 
     use super::*;
 
     #[test]
     fn test_loading_rust_analyzer() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
-        let cargo_config = CargoConfig::default();
+        let cargo_config = CargoConfig { set_test: true, ..CargoConfig::default() };
         let load_cargo_config = LoadCargoConfig {
             load_out_dirs_from_check: false,
             with_proc_macro_server: ProcMacroServerChoice::None,
             prefill_caches: false,
         };
-        let (host, _vfs, _proc_macro) =
+        let (db, _vfs, _proc_macro) =
             load_workspace_at(path, &cargo_config, &load_cargo_config, &|_| {}).unwrap();
 
-        let n_crates = host.raw_database().crate_graph().iter().count();
+        let n_crates = db.crate_graph().iter().count();
         // RA has quite a few crates, but the exact count doesn't matter
         assert!(n_crates > 20);
+    }
+
+    #[test]
+    fn unrelated_sources() {
+        let mut builder = FileSetConfigBuilder::default();
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/abc".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def".to_owned())]);
+        let fsc = builder.build();
+        let src = SourceRootConfig { fsc, local_filesets: vec![0, 1] };
+        let vc = src.source_root_parent_map().into_iter().collect::<Vec<_>>();
+
+        assert_eq!(vc, vec![])
+    }
+
+    #[test]
+    fn unrelated_source_sharing_dirname() {
+        let mut builder = FileSetConfigBuilder::default();
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/abc".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/abc".to_owned())]);
+        let fsc = builder.build();
+        let src = SourceRootConfig { fsc, local_filesets: vec![0, 1] };
+        let vc = src.source_root_parent_map().into_iter().collect::<Vec<_>>();
+
+        assert_eq!(vc, vec![])
+    }
+
+    #[test]
+    fn basic_child_parent() {
+        let mut builder = FileSetConfigBuilder::default();
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/abc".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/abc/def".to_owned())]);
+        let fsc = builder.build();
+        let src = SourceRootConfig { fsc, local_filesets: vec![0, 1] };
+        let vc = src.source_root_parent_map().into_iter().collect::<Vec<_>>();
+
+        assert_eq!(vc, vec![(SourceRootId(1), SourceRootId(0))])
+    }
+
+    #[test]
+    fn basic_child_parent_with_unrelated_parents_sib() {
+        let mut builder = FileSetConfigBuilder::default();
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/abc".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/abc".to_owned())]);
+        let fsc = builder.build();
+        let src = SourceRootConfig { fsc, local_filesets: vec![0, 1, 2] };
+        let vc = src.source_root_parent_map().into_iter().collect::<Vec<_>>();
+
+        assert_eq!(vc, vec![(SourceRootId(2), SourceRootId(1))])
+    }
+
+    #[test]
+    fn deep_sources_with_parent_missing() {
+        let mut builder = FileSetConfigBuilder::default();
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/abc".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/ghi".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/abc".to_owned())]);
+        let fsc = builder.build();
+        let src = SourceRootConfig { fsc, local_filesets: vec![0, 1, 2] };
+        let vc = src.source_root_parent_map().into_iter().collect::<Vec<_>>();
+
+        assert_eq!(vc, vec![])
+    }
+
+    #[test]
+    fn ancestor_can_be_parent() {
+        let mut builder = FileSetConfigBuilder::default();
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/abc".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/ghi/jkl".to_owned())]);
+        let fsc = builder.build();
+        let src = SourceRootConfig { fsc, local_filesets: vec![0, 1, 2] };
+        let vc = src.source_root_parent_map().into_iter().collect::<Vec<_>>();
+
+        assert_eq!(vc, vec![(SourceRootId(2), SourceRootId(1))])
+    }
+
+    #[test]
+    fn ancestor_can_be_parent_2() {
+        let mut builder = FileSetConfigBuilder::default();
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/abc".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/ghi/jkl".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/ghi/klm".to_owned())]);
+        let fsc = builder.build();
+        let src = SourceRootConfig { fsc, local_filesets: vec![0, 1, 2, 3] };
+        let mut vc = src.source_root_parent_map().into_iter().collect::<Vec<_>>();
+        vc.sort_by(|x, y| x.0 .0.cmp(&y.0 .0));
+
+        assert_eq!(vc, vec![(SourceRootId(2), SourceRootId(1)), (SourceRootId(3), SourceRootId(1))])
+    }
+
+    #[test]
+    fn non_locals_are_skipped() {
+        let mut builder = FileSetConfigBuilder::default();
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/abc".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/ghi/jkl".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/klm".to_owned())]);
+        let fsc = builder.build();
+        let src = SourceRootConfig { fsc, local_filesets: vec![0, 1, 3] };
+        let mut vc = src.source_root_parent_map().into_iter().collect::<Vec<_>>();
+        vc.sort_by(|x, y| x.0 .0.cmp(&y.0 .0));
+
+        assert_eq!(vc, vec![(SourceRootId(3), SourceRootId(1)),])
+    }
+
+    #[test]
+    fn child_binds_ancestor_if_parent_nonlocal() {
+        let mut builder = FileSetConfigBuilder::default();
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/abc".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/klm".to_owned())]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/klm/jkl".to_owned())]);
+        let fsc = builder.build();
+        let src = SourceRootConfig { fsc, local_filesets: vec![0, 1, 3] };
+        let mut vc = src.source_root_parent_map().into_iter().collect::<Vec<_>>();
+        vc.sort_by(|x, y| x.0 .0.cmp(&y.0 .0));
+
+        assert_eq!(vc, vec![(SourceRootId(3), SourceRootId(1)),])
+    }
+
+    #[test]
+    fn parents_with_identical_root_id() {
+        let mut builder = FileSetConfigBuilder::default();
+        builder.add_file_set(vec![
+            VfsPath::new_virtual_path("/ROOT/def".to_owned()),
+            VfsPath::new_virtual_path("/ROOT/def/abc/def".to_owned()),
+        ]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/abc/def/ghi".to_owned())]);
+        let fsc = builder.build();
+        let src = SourceRootConfig { fsc, local_filesets: vec![0, 1] };
+        let mut vc = src.source_root_parent_map().into_iter().collect::<Vec<_>>();
+        vc.sort_by(|x, y| x.0 .0.cmp(&y.0 .0));
+
+        assert_eq!(vc, vec![(SourceRootId(1), SourceRootId(0)),])
+    }
+
+    #[test]
+    fn circular_reference() {
+        let mut builder = FileSetConfigBuilder::default();
+        builder.add_file_set(vec![
+            VfsPath::new_virtual_path("/ROOT/def".to_owned()),
+            VfsPath::new_virtual_path("/ROOT/def/abc/def".to_owned()),
+        ]);
+        builder.add_file_set(vec![VfsPath::new_virtual_path("/ROOT/def/abc".to_owned())]);
+        let fsc = builder.build();
+        let src = SourceRootConfig { fsc, local_filesets: vec![0, 1] };
+        let mut vc = src.source_root_parent_map().into_iter().collect::<Vec<_>>();
+        vc.sort_by(|x, y| x.0 .0.cmp(&y.0 .0));
+
+        assert_eq!(vc, vec![(SourceRootId(1), SourceRootId(0)),])
     }
 }

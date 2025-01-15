@@ -1,6 +1,5 @@
-use crate::fmt;
 use crate::mem::MaybeUninit;
-use crate::str;
+use crate::{fmt, str};
 
 /// Used for slow path in `Display` implementations when alignment is required.
 pub struct DisplayBuffer<const SIZE: usize> {
@@ -11,7 +10,7 @@ pub struct DisplayBuffer<const SIZE: usize> {
 impl<const SIZE: usize> DisplayBuffer<SIZE> {
     #[inline]
     pub const fn new() -> Self {
-        Self { buf: MaybeUninit::uninit_array(), len: 0 }
+        Self { buf: [MaybeUninit::uninit(); SIZE], len: 0 }
     }
 
     #[inline]
@@ -19,7 +18,7 @@ impl<const SIZE: usize> DisplayBuffer<SIZE> {
         // SAFETY: `buf` is only written to by the `fmt::Write::write_str` implementation
         // which writes a valid UTF-8 string to `buf` and correctly sets `len`.
         unsafe {
-            let s = MaybeUninit::slice_assume_init_ref(&self.buf[..self.len]);
+            let s = self.buf[..self.len].assume_init_ref();
             str::from_utf8_unchecked(s)
         }
     }
@@ -30,7 +29,7 @@ impl<const SIZE: usize> fmt::Write for DisplayBuffer<SIZE> {
         let bytes = s.as_bytes();
 
         if let Some(buf) = self.buf.get_mut(self.len..(self.len + bytes.len())) {
-            MaybeUninit::write_slice(buf, bytes);
+            buf.write_copy_of_slice(bytes);
             self.len += bytes.len();
             Ok(())
         } else {

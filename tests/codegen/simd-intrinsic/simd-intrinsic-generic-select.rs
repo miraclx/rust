@@ -1,23 +1,23 @@
-// compile-flags: -C no-prepopulate-passes
+//@ compile-flags: -C no-prepopulate-passes
 
 #![crate_type = "lib"]
 
-#![feature(repr_simd, platform_intrinsics)]
+#![feature(repr_simd, intrinsics)]
 #[allow(non_camel_case_types)]
 
 #[repr(simd)]
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct f32x4(pub f32, pub f32, pub f32, pub f32);
+pub struct f32x4(pub [f32; 4]);
 
 #[repr(simd)]
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct f32x8(f32, f32, f32, f32, f32, f32, f32, f32);
+pub struct f32x8([f32; 8]);
 
 #[repr(simd)]
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct b8x4(pub i8, pub i8, pub i8, pub i8);
+pub struct b8x4(pub [i8; 4]);
 
-extern "platform-intrinsic" {
+extern "rust-intrinsic" {
     fn simd_select<T, U>(x: T, a: U, b: U) -> U;
     fn simd_select_bitmask<T, U>(x: T, a: U, b: U) -> U;
 }

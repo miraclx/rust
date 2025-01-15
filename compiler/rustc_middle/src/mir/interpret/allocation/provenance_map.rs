@@ -3,17 +3,19 @@
 
 use std::cmp;
 
+use rustc_abi::{HasDataLayout, Size};
 use rustc_data_structures::sorted_map::SortedMap;
-use rustc_target::abi::{HasDataLayout, Size};
-
-use super::{alloc_range, AllocError, AllocId, AllocRange, AllocResult, Provenance};
+use rustc_macros::HashStable;
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
+use tracing::trace;
+
+use super::{AllocError, AllocRange, AllocResult, CtfeProvenance, Provenance, alloc_range};
 
 /// Stores the provenance information of pointers stored in memory.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 #[derive(HashStable)]
-pub struct ProvenanceMap<Prov = AllocId> {
-    /// Provenance in this map applies from the given offset for an entire pointer-size worth of
+pub struct ProvenanceMap<Prov = CtfeProvenance> {
+    /// `Provenance` in this map applies from the given offset for an entire pointer-size worth of
     /// bytes. Two entries in this map are always at least a pointer size apart.
     ptrs: SortedMap<Size, Prov>,
     /// Provenance in this map only applies to the given single byte.
@@ -22,18 +24,19 @@ pub struct ProvenanceMap<Prov = AllocId> {
     bytes: Option<Box<SortedMap<Size, Prov>>>,
 }
 
+// These impls are generic over `Prov` since `CtfeProvenance` is only decodable/encodable
+// for some particular `D`/`S`.
 impl<D: Decoder, Prov: Provenance + Decodable<D>> Decodable<D> for ProvenanceMap<Prov> {
     fn decode(d: &mut D) -> Self {
-        assert!(!Prov::OFFSET_IS_ADDR); // only `AllocId` is ever serialized
+        assert!(!Prov::OFFSET_IS_ADDR); // only `CtfeProvenance` is ever serialized
         Self { ptrs: Decodable::decode(d), bytes: None }
     }
 }
-
 impl<S: Encoder, Prov: Provenance + Encodable<S>> Encodable<S> for ProvenanceMap<Prov> {
     fn encode(&self, s: &mut S) {
         let Self { ptrs, bytes } = self;
-        assert!(!Prov::OFFSET_IS_ADDR); // only `AllocId` is ever serialized
-        debug_assert!(bytes.is_none());
+        assert!(!Prov::OFFSET_IS_ADDR); // only `CtfeProvenance` is ever serialized
+        debug_assert!(bytes.is_none()); // without `OFFSET_IS_ADDR`, this is always empty
         ptrs.encode(s)
     }
 }
@@ -54,10 +57,10 @@ impl ProvenanceMap {
     /// Give access to the ptr-sized provenances (which can also be thought of as relocations, and
     /// indeed that is how codegen treats them).
     ///
-    /// Only exposed with `AllocId` provenance, since it panics if there is bytewise provenance.
+    /// Only exposed with `CtfeProvenance` provenance, since it panics if there is bytewise provenance.
     #[inline]
-    pub fn ptrs(&self) -> &SortedMap<Size, AllocId> {
-        debug_assert!(self.bytes.is_none()); // `AllocId::OFFSET_IS_ADDR` is false so this cannot fail
+    pub fn ptrs(&self) -> &SortedMap<Size, CtfeProvenance> {
+        debug_assert!(self.bytes.is_none()); // `CtfeProvenance::OFFSET_IS_ADDR` is false so this cannot fail
         &self.ptrs
     }
 }
@@ -192,6 +195,25 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
 
         Ok(())
     }
+
+    /// Overwrites all provenance in the allocation with wildcard provenance.
+    ///
+    /// Provided for usage in Miri and panics otherwise.
+    pub fn write_wildcards(&mut self, alloc_size: usize) {
+        assert!(
+            Prov::OFFSET_IS_ADDR,
+            "writing wildcard provenance is not supported when `OFFSET_IS_ADDR` is false"
+        );
+        let wildcard = Prov::WILDCARD.unwrap();
+
+        // Remove all pointer provenances, then write wildcards into the whole byte range.
+        self.ptrs.clear();
+        let last = Size::from_bytes(alloc_size);
+        let bytes = self.bytes.get_or_insert_with(Box::default);
+        for offset in Size::ZERO..last {
+            bytes.insert(offset, wildcard);
+        }
+    }
 }
 
 /// A partial, owned list of provenance to transfer into another allocation.
@@ -315,7 +337,9 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
             self.ptrs.insert_presorted(dest_ptrs.into());
         }
         if Prov::OFFSET_IS_ADDR {
-            if let Some(dest_bytes) = copy.dest_bytes && !dest_bytes.is_empty() {
+            if let Some(dest_bytes) = copy.dest_bytes
+                && !dest_bytes.is_empty()
+            {
                 self.bytes.get_or_insert_with(Box::default).insert_presorted(dest_bytes.into());
             }
         } else {

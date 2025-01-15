@@ -1,7 +1,8 @@
-use ide_db::{base_db::FileId, source_change::SourceChange};
+use hir::InFile;
+use ide_db::text_edit::TextEdit;
+use ide_db::{source_change::SourceChange, EditionedFileId, FileRange};
 use itertools::Itertools;
-use syntax::{ast, AstNode, SyntaxNode};
-use text_edit::TextEdit;
+use syntax::{ast, AstNode, SyntaxNode, SyntaxNodePtr};
 
 use crate::{fix, Diagnostic, DiagnosticCode};
 
@@ -10,7 +11,7 @@ use crate::{fix, Diagnostic, DiagnosticCode};
 // Diagnostic for unnecessary braces in `use` items.
 pub(crate) fn useless_braces(
     acc: &mut Vec<Diagnostic>,
-    file_id: FileId,
+    file_id: EditionedFileId,
     node: &SyntaxNode,
 ) -> Option<()> {
     let use_tree_list = ast::UseTreeList::cast(node.clone())?;
@@ -36,9 +37,10 @@ pub(crate) fn useless_braces(
         acc.push(
             Diagnostic::new(
                 DiagnosticCode::RustcLint("unused_braces"),
-                "Unnecessary braces in use statement".to_string(),
-                use_range,
+                "Unnecessary braces in use statement".to_owned(),
+                FileRange { file_id: file_id.into(), range: use_range },
             )
+            .with_main_node(InFile::new(file_id.into(), SyntaxNodePtr::new(node)))
             .with_fixes(Some(vec![fix(
                 "remove_braces",
                 "Remove unnecessary braces",
@@ -107,7 +109,7 @@ mod a {
         );
 
         let mut config = DiagnosticsConfig::test_sample();
-        config.disabled.insert("syntax-error".to_string());
+        config.disabled.insert("syntax-error".to_owned());
         check_diagnostics_with_config(
             config,
             r#"
@@ -153,6 +155,25 @@ use a::{c, d::{e$0}};
             r#"
 mod a { pub mod c {} pub mod d { pub mod e {} } }
 use a::{c, d::e};
+"#,
+        );
+    }
+
+    #[test]
+    fn respect_lint_attributes_for_unused_braces() {
+        check_diagnostics(
+            r#"
+mod b {}
+#[allow(unused_braces)]
+use {b};
+"#,
+        );
+        check_diagnostics(
+            r#"
+mod b {}
+#[deny(unused_braces)]
+use {b};
+  //^^^ 💡 error: Unnecessary braces in use statement
 "#,
         );
     }

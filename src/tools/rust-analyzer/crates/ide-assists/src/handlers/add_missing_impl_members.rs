@@ -1,5 +1,8 @@
 use hir::HasSource;
-use syntax::ast::{self, make, AstNode};
+use syntax::{
+    ast::{self, make, AstNode},
+    Edition,
+};
 
 use crate::{
     assist_context::{AssistContext, Assists},
@@ -105,7 +108,7 @@ fn add_missing_impl_members_inner(
     assist_id: &'static str,
     label: &'static str,
 ) -> Option<()> {
-    let _p = profile::span("add_missing_impl_members_inner");
+    let _p = tracing::info_span!("add_missing_impl_members_inner").entered();
     let impl_def = ctx.find_node_at_offset::<ast::Impl>()?;
     let impl_ = ctx.sema.to_def(&impl_def)?;
 
@@ -150,14 +153,22 @@ fn add_missing_impl_members_inner(
             &missing_items,
             trait_,
             &new_impl_def,
-            target_scope,
+            &target_scope,
         );
 
         if let Some(cap) = ctx.config.snippet_cap {
             let mut placeholder = None;
             if let DefaultMethods::No = mode {
                 if let ast::AssocItem::Fn(func) = &first_new_item {
-                    if try_gen_trait_body(ctx, func, trait_ref, &impl_def).is_none() {
+                    if try_gen_trait_body(
+                        ctx,
+                        func,
+                        trait_ref,
+                        &impl_def,
+                        target_scope.krate().edition(ctx.sema.db),
+                    )
+                    .is_none()
+                    {
                         if let Some(m) = func.syntax().descendants().find_map(ast::MacroCall::cast)
                         {
                             if m.syntax().text() == "todo!()" {
@@ -182,9 +193,11 @@ fn try_gen_trait_body(
     func: &ast::Fn,
     trait_ref: hir::TraitRef,
     impl_def: &ast::Impl,
+    edition: Edition,
 ) -> Option<()> {
-    let trait_path =
-        make::ext::ident_path(&trait_ref.trait_().name(ctx.db()).display(ctx.db()).to_string());
+    let trait_path = make::ext::ident_path(
+        &trait_ref.trait_().name(ctx.db()).display(ctx.db(), edition).to_string(),
+    );
     let hir_ty = ctx.sema.resolve_type(&impl_def.self_ty()?)?;
     let adt = hir_ty.as_adt()?.source(ctx.db())?;
     gen_trait_fn_body(func, &trait_path, &adt.value, Some(trait_ref))
@@ -370,17 +383,17 @@ impl<U> Foo<U> for S {
             add_missing_impl_members,
             r#"
 pub trait Trait<'a, 'b, A, B, C> {
-    fn foo(&self, one: &'a A, anoter: &'b B) -> &'a C;
+    fn foo(&self, one: &'a A, another: &'b B) -> &'a C;
 }
 
 impl<'x, 'y, T, V, U> Trait<'x, 'y, T, V, U> for () {$0}"#,
             r#"
 pub trait Trait<'a, 'b, A, B, C> {
-    fn foo(&self, one: &'a A, anoter: &'b B) -> &'a C;
+    fn foo(&self, one: &'a A, another: &'b B) -> &'a C;
 }
 
 impl<'x, 'y, T, V, U> Trait<'x, 'y, T, V, U> for () {
-    fn foo(&self, one: &'x T, anoter: &'y V) -> &'x U {
+    fn foo(&self, one: &'x T, another: &'y V) -> &'x U {
         ${0:todo!()}
     }
 }"#,
@@ -393,7 +406,7 @@ impl<'x, 'y, T, V, U> Trait<'x, 'y, T, V, U> for () {
             add_missing_default_members,
             r#"
 pub trait Trait<'a, 'b, A, B, C: Default> {
-    fn foo(&self, _one: &'a A, _anoter: &'b B) -> (C, &'a i32) {
+    fn foo(&self, _one: &'a A, _another: &'b B) -> (C, &'a i32) {
         let value: &'a i32 = &0;
         (C::default(), value)
     }
@@ -402,14 +415,14 @@ pub trait Trait<'a, 'b, A, B, C: Default> {
 impl<'x, 'y, T, V, U: Default> Trait<'x, 'y, T, V, U> for () {$0}"#,
             r#"
 pub trait Trait<'a, 'b, A, B, C: Default> {
-    fn foo(&self, _one: &'a A, _anoter: &'b B) -> (C, &'a i32) {
+    fn foo(&self, _one: &'a A, _another: &'b B) -> (C, &'a i32) {
         let value: &'a i32 = &0;
         (C::default(), value)
     }
 }
 
 impl<'x, 'y, T, V, U: Default> Trait<'x, 'y, T, V, U> for () {
-    $0fn foo(&self, _one: &'x T, _anoter: &'y V) -> (U, &'x i32) {
+    $0fn foo(&self, _one: &'x T, _another: &'y V) -> (U, &'x i32) {
         let value: &'x i32 = &0;
         (<U>::default(), value)
     }
@@ -2248,5 +2261,106 @@ impl b::LocalTrait for B {
 }
             "#,
         )
+    }
+
+    #[test]
+    fn doc_hidden_nondefault_member() {
+        check_assist(
+            add_missing_impl_members,
+            r#"
+//- /lib.rs crate:b new_source_root:local
+trait LocalTrait {
+    #[doc(hidden)]
+    fn no_skip_non_default() -> Option<()>;
+
+    #[doc(hidden)]
+    fn skip_default() -> Option<()> {
+        todo!()
+    }
+}
+
+//- /main.rs crate:a deps:b
+struct B;
+impl b::Loc$0alTrait for B {}
+            "#,
+            r#"
+struct B;
+impl b::LocalTrait for B {
+    fn no_skip_non_default() -> Option<()> {
+        ${0:todo!()}
+    }
+}
+            "#,
+        )
+    }
+
+    #[test]
+    fn impl_with_type_param_with_former_param_as_default() {
+        check_assist(
+            add_missing_impl_members,
+            r#"
+pub trait Test<'a, T, U = T> {
+    fn test(item: &'a T) -> U;
+}
+impl<'a> Test<'a, i32> for bool {
+    $0
+}
+"#,
+            r#"
+pub trait Test<'a, T, U = T> {
+    fn test(item: &'a T) -> U;
+}
+impl<'a> Test<'a, i32> for bool {
+    fn test(item: &'a i32) -> i32 {
+        ${0:todo!()}
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn issue_17321() {
+        check_assist(
+            add_missing_impl_members,
+            r#"
+fn main() {}
+
+mod other_file_1 {
+    pub const SOME_CONSTANT: usize = 8;
+}
+
+mod other_file_2 {
+    use crate::other_file_1::SOME_CONSTANT;
+
+    pub trait Trait {
+        type Iter: Iterator<Item = [u8; SOME_CONSTANT]>;
+    }
+}
+
+pub struct MyStruct;
+
+impl other_file_2::Trait for MyStruct$0 {}"#,
+            r#"
+fn main() {}
+
+mod other_file_1 {
+    pub const SOME_CONSTANT: usize = 8;
+}
+
+mod other_file_2 {
+    use crate::other_file_1::SOME_CONSTANT;
+
+    pub trait Trait {
+        type Iter: Iterator<Item = [u8; SOME_CONSTANT]>;
+    }
+}
+
+pub struct MyStruct;
+
+impl other_file_2::Trait for MyStruct {
+    $0type Iter;
+}"#,
+        );
     }
 }

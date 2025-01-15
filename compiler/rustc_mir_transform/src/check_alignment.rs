@@ -1,24 +1,21 @@
-use crate::MirPass;
-use rustc_hir::def_id::DefId;
 use rustc_hir::lang_items::LangItem;
 use rustc_index::IndexVec;
+use rustc_middle::mir::interpret::Scalar;
+use rustc_middle::mir::visit::{MutatingUseContext, NonMutatingUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::*;
-use rustc_middle::mir::{
-    interpret::{ConstValue, Scalar},
-    visit::{PlaceContext, Visitor},
-};
-use rustc_middle::ty::{Ty, TyCtxt, TypeAndMut};
+use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_session::Session;
+use tracing::{debug, trace};
 
-pub struct CheckAlignment;
+pub(super) struct CheckAlignment;
 
-impl<'tcx> MirPass<'tcx> for CheckAlignment {
+impl<'tcx> crate::MirPass<'tcx> for CheckAlignment {
     fn is_enabled(&self, sess: &Session) -> bool {
         // FIXME(#112480) MSVC and rustc disagree on minimum stack alignment on x86 Windows
         if sess.target.llvm_target == "i686-pc-windows-msvc" {
             return false;
         }
-        sess.opts.debug_assertions
+        sess.ub_checks()
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
@@ -28,9 +25,14 @@ impl<'tcx> MirPass<'tcx> for CheckAlignment {
             return;
         }
 
+        let typing_env = body.typing_env(tcx);
         let basic_blocks = body.basic_blocks.as_mut();
         let local_decls = &mut body.local_decls;
 
+        // This pass inserts new blocks. Each insertion changes the Location for all
+        // statements/blocks after. Iterating or visiting the MIR in order would require updating
+        // our current location after every insertion. By iterating backwards, we dodge this issue:
+        // The only Locations that an insertion changes have already been handled.
         for block in (0..basic_blocks.len()).rev() {
             let block = block.into();
             for statement_index in (0..basic_blocks[block].statements.len()).rev() {
@@ -38,22 +40,19 @@ impl<'tcx> MirPass<'tcx> for CheckAlignment {
                 let statement = &basic_blocks[block].statements[statement_index];
                 let source_info = statement.source_info;
 
-                let mut finder = PointerFinder {
-                    local_decls,
-                    tcx,
-                    pointers: Vec::new(),
-                    def_id: body.source.def_id(),
-                };
-                for (pointer, pointee_ty) in finder.find_pointers(statement) {
-                    debug!("Inserting alignment check for {:?}", pointer.ty(&*local_decls, tcx).ty);
+                let mut finder =
+                    PointerFinder { tcx, local_decls, typing_env, pointers: Vec::new() };
+                finder.visit_statement(statement, location);
 
+                for (local, ty) in finder.pointers {
+                    debug!("Inserting alignment check for {:?}", ty);
                     let new_block = split_block(basic_blocks, location);
                     insert_alignment_check(
                         tcx,
                         local_decls,
                         &mut basic_blocks[block],
-                        pointer,
-                        pointee_ty,
+                        local,
+                        ty,
                         source_info,
                         new_block,
                     );
@@ -63,69 +62,71 @@ impl<'tcx> MirPass<'tcx> for CheckAlignment {
     }
 }
 
-impl<'tcx, 'a> PointerFinder<'tcx, 'a> {
-    fn find_pointers(&mut self, statement: &Statement<'tcx>) -> Vec<(Place<'tcx>, Ty<'tcx>)> {
-        self.pointers.clear();
-        self.visit_statement(statement, Location::START);
-        core::mem::take(&mut self.pointers)
-    }
-}
-
-struct PointerFinder<'tcx, 'a> {
-    local_decls: &'a mut LocalDecls<'tcx>,
+struct PointerFinder<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
-    def_id: DefId,
+    local_decls: &'a mut LocalDecls<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
     pointers: Vec<(Place<'tcx>, Ty<'tcx>)>,
 }
 
-impl<'tcx, 'a> Visitor<'tcx> for PointerFinder<'tcx, 'a> {
-    fn visit_rvalue(&mut self, rvalue: &Rvalue<'tcx>, location: Location) {
-        if let Rvalue::AddressOf(..) = rvalue {
-            // Ignore dereferences inside of an AddressOf
-            return;
+impl<'a, 'tcx> Visitor<'tcx> for PointerFinder<'a, 'tcx> {
+    fn visit_place(&mut self, place: &Place<'tcx>, context: PlaceContext, location: Location) {
+        // We want to only check reads and writes to Places, so we specifically exclude
+        // Borrow and RawBorrow.
+        match context {
+            PlaceContext::MutatingUse(
+                MutatingUseContext::Store
+                | MutatingUseContext::AsmOutput
+                | MutatingUseContext::Call
+                | MutatingUseContext::Yield
+                | MutatingUseContext::Drop,
+            ) => {}
+            PlaceContext::NonMutatingUse(
+                NonMutatingUseContext::Copy | NonMutatingUseContext::Move,
+            ) => {}
+            _ => {
+                return;
+            }
         }
-        self.super_rvalue(rvalue, location);
-    }
 
-    fn visit_place(&mut self, place: &Place<'tcx>, context: PlaceContext, _location: Location) {
-        if let PlaceContext::NonUse(_) = context {
-            return;
-        }
         if !place.is_indirect() {
             return;
         }
 
+        // Since Deref projections must come first and only once, the pointer for an indirect place
+        // is the Local that the Place is based on.
         let pointer = Place::from(place.local);
-        let pointer_ty = pointer.ty(&*self.local_decls, self.tcx).ty;
+        let pointer_ty = self.local_decls[place.local].ty;
 
-        // We only want to check unsafe pointers
+        // We only want to check places based on unsafe pointers
         if !pointer_ty.is_unsafe_ptr() {
-            trace!("Indirect, but not an unsafe ptr, not checking {:?}", pointer_ty);
+            trace!("Indirect, but not based on an unsafe ptr, not checking {:?}", place);
             return;
         }
 
-        let Some(pointee) = pointer_ty.builtin_deref(true) else {
-            debug!("Indirect but no builtin deref: {:?}", pointer_ty);
+        let pointee_ty =
+            pointer_ty.builtin_deref(true).expect("no builtin_deref for an unsafe pointer");
+        // Ideally we'd support this in the future, but for now we are limited to sized types.
+        if !pointee_ty.is_sized(self.tcx, self.typing_env) {
+            debug!("Unsafe pointer, but pointee is not known to be sized: {:?}", pointer_ty);
             return;
+        }
+
+        // Try to detect types we are sure have an alignment of 1 and skip the check
+        // We don't need to look for str and slices, we already rejected unsized types above
+        let element_ty = match pointee_ty.kind() {
+            ty::Array(ty, _) => *ty,
+            _ => pointee_ty,
         };
-        let mut pointee_ty = pointee.ty;
-        if pointee_ty.is_array() || pointee_ty.is_slice() || pointee_ty.is_str() {
-            pointee_ty = pointee_ty.sequence_element_type(self.tcx);
-        }
-
-        if !pointee_ty.is_sized(self.tcx, self.tcx.param_env_reveal_all_normalized(self.def_id)) {
-            debug!("Unsafe pointer, but unsized: {:?}", pointer_ty);
+        if [self.tcx.types.bool, self.tcx.types.i8, self.tcx.types.u8].contains(&element_ty) {
+            debug!("Trivially aligned place type: {:?}", pointee_ty);
             return;
         }
 
-        if [self.tcx.types.bool, self.tcx.types.i8, self.tcx.types.u8, self.tcx.types.str_]
-            .contains(&pointee_ty)
-        {
-            debug!("Trivially aligned pointee type: {:?}", pointer_ty);
-            return;
-        }
+        // Ensure that this place is based on an aligned pointer.
+        self.pointers.push((pointer, pointee_ty));
 
-        self.pointers.push((pointer, pointee_ty))
+        self.super_place(place, context, location);
     }
 }
 
@@ -155,7 +156,7 @@ fn insert_alignment_check<'tcx>(
     new_block: BasicBlock,
 ) {
     // Cast the pointer to a *const ()
-    let const_raw_ptr = Ty::new_ptr(tcx, TypeAndMut { ty: tcx.types.unit, mutbl: Mutability::Not });
+    let const_raw_ptr = Ty::new_imm_ptr(tcx, tcx.types.unit);
     let rvalue = Rvalue::Cast(CastKind::PtrToPtr, Operand::Copy(pointer), const_raw_ptr);
     let thin_ptr = local_decls.push(LocalDecl::with_source_info(const_raw_ptr, source_info)).into();
     block_data
@@ -181,13 +182,10 @@ fn insert_alignment_check<'tcx>(
     // Subtract 1 from the alignment to get the alignment mask
     let alignment_mask =
         local_decls.push(LocalDecl::with_source_info(tcx.types.usize, source_info)).into();
-    let one = Operand::Constant(Box::new(Constant {
+    let one = Operand::Constant(Box::new(ConstOperand {
         span: source_info.span,
         user_ty: None,
-        literal: ConstantKind::Val(
-            ConstValue::Scalar(Scalar::from_target_usize(1, &tcx)),
-            tcx.types.usize,
-        ),
+        const_: Const::Val(ConstValue::Scalar(Scalar::from_target_usize(1, &tcx)), tcx.types.usize),
     }));
     block_data.statements.push(Statement {
         source_info,
@@ -213,13 +211,10 @@ fn insert_alignment_check<'tcx>(
 
     // Check if the alignment bits are all zero
     let is_ok = local_decls.push(LocalDecl::with_source_info(tcx.types.bool, source_info)).into();
-    let zero = Operand::Constant(Box::new(Constant {
+    let zero = Operand::Constant(Box::new(ConstOperand {
         span: source_info.span,
         user_ty: None,
-        literal: ConstantKind::Val(
-            ConstValue::Scalar(Scalar::from_target_usize(0, &tcx)),
-            tcx.types.usize,
-        ),
+        const_: Const::Val(ConstValue::Scalar(Scalar::from_target_usize(0, &tcx)), tcx.types.usize),
     }));
     block_data.statements.push(Statement {
         source_info,
