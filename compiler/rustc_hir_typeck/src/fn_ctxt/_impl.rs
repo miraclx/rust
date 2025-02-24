@@ -640,7 +640,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let witness = Ty::new_coroutine_witness(self.tcx, expr_def_id.to_def_id(), args);
 
             // Unify `interior` with `witness` and collect all the resulting obligations.
-            let span = self.tcx.hir().body(body_id).value.span;
+            let span = self.tcx.hir_body(body_id).value.span;
             let ty::Infer(ty::InferTy::TyVar(_)) = interior.kind() else {
                 span_bug!(span, "coroutine interior witness not infer: {:?}", interior.kind())
             };
@@ -856,7 +856,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     ) -> Option<(LocalDefId, &'tcx hir::FnDecl<'tcx>)> {
         // Get enclosing Fn, if it is a function or a trait method, unless there's a `loop` or
         // `while` before reaching it, as block tail returns are not available in them.
-        self.tcx.hir().get_fn_id_for_return_block(blk_id).and_then(|item_id| {
+        self.tcx.hir_get_fn_id_for_return_block(blk_id).and_then(|item_id| {
             match self.tcx.hir_node(item_id) {
                 Node::Item(&hir::Item {
                     kind: hir::ItemKind::Fn { sig, .. }, owner_id, ..
