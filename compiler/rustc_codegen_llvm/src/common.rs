@@ -7,7 +7,8 @@ use rustc_abi::{AddressSpace, HasDataLayout};
 use rustc_ast::Mutability;
 use rustc_codegen_ssa::common::TypeKind;
 use rustc_codegen_ssa::traits::*;
-use rustc_data_structures::stable_hasher::{Hash128, HashStable, StableHasher};
+use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_hashes::Hash128;
 use rustc_hir::def_id::DefId;
 use rustc_middle::bug;
 use rustc_middle::mir::interpret::{ConstAllocation, GlobalAlloc, Scalar};
@@ -76,7 +77,7 @@ impl<'ll> Funclet<'ll> {
     }
 
     pub(crate) fn bundle(&self) -> &llvm::OperandBundle<'ll> {
-        &self.operand
+        self.operand.raw()
     }
 }
 

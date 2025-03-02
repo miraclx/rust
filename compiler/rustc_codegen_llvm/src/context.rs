@@ -194,12 +194,18 @@ pub(crate) unsafe fn create_module<'ll>(
             target_data_layout = target_data_layout.replace("-i128:128", "");
         }
     }
+    if llvm_version < (21, 0, 0) {
+        if sess.target.arch == "nvptx64" {
+            // LLVM 21 updated the default layout on nvptx: https://github.com/llvm/llvm-project/pull/124961
+            target_data_layout = target_data_layout.replace("e-p6:32:32-i64", "e-i64");
+        }
+    }
 
     // Ensure the data-layout values hardcoded remain the defaults.
     {
         let tm = crate::back::write::create_informational_target_machine(tcx.sess, false);
         unsafe {
-            llvm::LLVMRustSetDataLayoutFromTargetMachine(llmod, &tm);
+            llvm::LLVMRustSetDataLayoutFromTargetMachine(llmod, tm.raw());
         }
 
         let llvm_data_layout = unsafe { llvm::LLVMGetDataLayoutStr(llmod) };

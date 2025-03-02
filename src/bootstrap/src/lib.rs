@@ -50,6 +50,8 @@ pub use utils::change_tracker::{
     CONFIG_CHANGE_HISTORY, find_recent_config_change_ids, human_readable_changes,
 };
 
+use crate::core::build_steps::vendor::VENDOR_DIR;
+
 const LLVM_TOOLS: &[&str] = &[
     "llvm-cov",      // used to generate coverage report
     "llvm-nm",       // used to inspect binaries; it shows symbol names, their sizes and visibility
@@ -469,7 +471,20 @@ impl Build {
     ///
     /// The given `err_hint` will be shown to the user if the submodule is not
     /// checked out and submodule management is disabled.
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(
+            level = "trace",
+            name = "Build::require_submodule",
+            skip_all,
+            fields(submodule = submodule),
+        ),
+    )]
     pub fn require_submodule(&self, submodule: &str, err_hint: Option<&str>) {
+        if self.rust_info().is_from_tarball() {
+            return;
+        }
+
         // When testing bootstrap itself, it is much faster to ignore
         // submodules. Almost all Steps work fine without their submodules.
         if cfg!(test) && !self.config.submodules() {
@@ -477,7 +492,7 @@ impl Build {
         }
         self.config.update_submodule(submodule);
         let absolute_path = self.config.src.join(submodule);
-        if dir_is_empty(&absolute_path) {
+        if !absolute_path.exists() || dir_is_empty(&absolute_path) {
             let maybe_enable = if !self.config.submodules()
                 && self.config.rust_info.is_managed_git_subrepository()
             {
@@ -622,7 +637,7 @@ impl Build {
 
         // Check for postponed failures from `test --no-fail-fast`.
         let failures = self.delayed_failures.borrow();
-        if failures.len() > 0 {
+        if !failures.is_empty() {
             eprintln!("\n{} command(s) did not execute successfully:\n", failures.len());
             for failure in failures.iter() {
                 eprintln!("  - {failure}\n");
@@ -677,7 +692,7 @@ impl Build {
             crates.is_empty() || possible_features_by_crates.contains(feature)
         };
         let mut features = vec![];
-        if self.config.jemalloc && check("jemalloc") {
+        if self.config.jemalloc(target) && check("jemalloc") {
             features.push("jemalloc");
         }
         if (self.config.llvm_enabled(target) || kind == Kind::Check) && check("llvm") {
@@ -739,7 +754,7 @@ impl Build {
     /// Note that if LLVM is configured externally then the directory returned
     /// will likely be empty.
     fn llvm_out(&self, target: TargetSelection) -> PathBuf {
-        if self.config.llvm_from_ci && self.is_builder_target(&target) {
+        if self.config.llvm_from_ci && self.is_builder_target(target) {
             self.config.ci_llvm_root()
         } else {
             self.out.join(target).join("llvm")
@@ -782,6 +797,11 @@ impl Build {
         self.out.join(target).join("md-doc")
     }
 
+    /// Path to the vendored Rust crates.
+    fn vendored_crates_path(&self) -> Option<PathBuf> {
+        if self.config.vendor { Some(self.src.join(VENDOR_DIR)) } else { None }
+    }
+
     /// Returns `true` if this is an external version of LLVM not managed by bootstrap.
     /// In particular, we expect llvm sources to be available when this is false.
     ///
@@ -789,7 +809,7 @@ impl Build {
     fn is_system_llvm(&self, target: TargetSelection) -> bool {
         match self.config.target_config.get(&target) {
             Some(Target { llvm_config: Some(_), .. }) => {
-                let ci_llvm = self.config.llvm_from_ci && self.is_builder_target(&target);
+                let ci_llvm = self.config.llvm_from_ci && self.is_builder_target(target);
                 !ci_llvm
             }
             // We're building from the in-tree src/llvm-project sources.
@@ -1277,7 +1297,7 @@ Executed at: {executed_at}"#,
             // need to use CXX compiler as linker to resolve the exception functions
             // that are only existed in CXX libraries
             Some(self.cxx.borrow()[&target].path().into())
-        } else if !self.is_builder_target(&target)
+        } else if !self.is_builder_target(target)
             && helpers::use_host_linker(target)
             && !target.is_msvc()
         {
@@ -1930,8 +1950,8 @@ to download LLVM rather than building it.
     }
 
     /// Checks if the given target is the same as the builder target.
-    fn is_builder_target(&self, target: &TargetSelection) -> bool {
-        &self.config.build == target
+    fn is_builder_target(&self, target: TargetSelection) -> bool {
+        self.config.build == target
     }
 }
 

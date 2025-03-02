@@ -497,9 +497,14 @@ static RISCV_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     ("relax", Unstable(sym::riscv_target_feature), &[]),
     ("unaligned-scalar-mem", Unstable(sym::riscv_target_feature), &[]),
     ("v", Unstable(sym::riscv_target_feature), &[]),
+    ("za128rs", Unstable(sym::riscv_target_feature), &[]),
+    ("za64rs", Unstable(sym::riscv_target_feature), &[]),
     ("zaamo", Unstable(sym::riscv_target_feature), &[]),
     ("zabha", Unstable(sym::riscv_target_feature), &["zaamo"]),
+    ("zacas", Unstable(sym::riscv_target_feature), &["zaamo"]),
     ("zalrsc", Unstable(sym::riscv_target_feature), &[]),
+    ("zama16b", Unstable(sym::riscv_target_feature), &[]),
+    ("zawrs", Unstable(sym::riscv_target_feature), &[]),
     ("zba", Stable, &[]),
     ("zbb", Stable, &[]),
     ("zbc", Stable, &[]),
@@ -611,7 +616,26 @@ static LOONGARCH_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
 const IBMZ_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     // tidy-alphabetical-start
     ("backchain", Unstable(sym::s390x_target_feature), &[]),
+    ("deflate-conversion", Unstable(sym::s390x_target_feature), &[]),
+    ("enhanced-sort", Unstable(sym::s390x_target_feature), &[]),
+    ("guarded-storage", Unstable(sym::s390x_target_feature), &[]),
+    ("high-word", Unstable(sym::s390x_target_feature), &[]),
+    ("nnp-assist", Unstable(sym::s390x_target_feature), &["vector"]),
+    ("transactional-execution", Unstable(sym::s390x_target_feature), &[]),
     ("vector", Unstable(sym::s390x_target_feature), &[]),
+    ("vector-enhancements-1", Unstable(sym::s390x_target_feature), &["vector"]),
+    ("vector-enhancements-2", Unstable(sym::s390x_target_feature), &["vector-enhancements-1"]),
+    ("vector-packed-decimal", Unstable(sym::s390x_target_feature), &["vector"]),
+    (
+        "vector-packed-decimal-enhancement",
+        Unstable(sym::s390x_target_feature),
+        &["vector-packed-decimal"],
+    ),
+    (
+        "vector-packed-decimal-enhancement-2",
+        Unstable(sym::s390x_target_feature),
+        &["vector-packed-decimal-enhancement"],
+    ),
     // tidy-alphabetical-end
 ];
 
@@ -768,7 +792,7 @@ impl Target {
     /// the first list contains target features that must be enabled for ABI reasons,
     /// and the second list contains target feature that must be disabled for ABI reasons.
     ///
-    /// These features are automatically appended to whatever the target spec sats as default
+    /// These features are automatically appended to whatever the target spec sets as default
     /// features for the target.
     ///
     /// All features enabled/disabled via `-Ctarget-features` and `#[target_features]` are checked
