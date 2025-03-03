@@ -350,4 +350,19 @@ pub const CONFIG_CHANGE_HISTORY: &[ChangeInfo] = &[
         severity: ChangeSeverity::Info,
         summary: "The llvm.ccache option has moved to build.ccache. llvm.ccache is now deprecated.",
     },
+    ChangeInfo {
+        change_id: 137170,
+        severity: ChangeSeverity::Info,
+        summary: "It is now possible to configure `jemalloc` for each target",
+    },
+    ChangeInfo {
+        change_id: 137215,
+        severity: ChangeSeverity::Info,
+        summary: "Added `build.test-stage = 2` to 'tools' profile defaults",
+    },
+    ChangeInfo {
+        change_id: 137220,
+        severity: ChangeSeverity::Info,
+        summary: "`rust.channel` now supports \"auto-detect\" to load the channel from `src/ci/channel`",
+    },
 ];

@@ -6,6 +6,7 @@ use clippy_utils::source::snippet;
 use clippy_utils::ty::{for_each_top_level_late_bound_region, is_copy};
 use clippy_utils::{is_self, is_self_ty};
 use core::ops::ControlFlow;
+use rustc_abi::ExternAbi;
 use rustc_ast::attr;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::Applicability;
@@ -19,7 +20,6 @@ use rustc_middle::ty::{self, RegionKind, TyCtxt};
 use rustc_session::impl_lint_pass;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::{Span, sym};
-use rustc_abi::ExternAbi;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -136,7 +136,7 @@ impl PassByRefOrValue {
         }
 
         let fn_sig = cx.tcx.fn_sig(def_id).instantiate_identity();
-        let fn_body = cx.enclosing_body.map(|id| cx.tcx.hir().body(id));
+        let fn_body = cx.enclosing_body.map(|id| cx.tcx.hir_body(id));
 
         // Gather all the lifetimes found in the output type which may affect whether
         // `TRIVIALLY_COPY_PASS_BY_REF` should be linted.

@@ -49,11 +49,13 @@ use rustc_span::{DUMMY_SP, Ident, Span, Symbol, kw};
 use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::traits::wf::object_region_bounds;
 use rustc_trait_selection::traits::{self, ObligationCtxt};
+use rustc_type_ir::Upcast;
 use tracing::{debug, instrument};
 
-use crate::bounds::Bounds;
 use crate::check::check_abi_fn_ptr;
-use crate::errors::{AmbiguousLifetimeBound, BadReturnTypeNotation, InvalidBaseType};
+use crate::errors::{
+    AmbiguousLifetimeBound, BadReturnTypeNotation, InvalidBaseType, NoVariantNamed,
+};
 use crate::hir_ty_lowering::errors::{GenericsArgsErrExtend, prohibit_assoc_item_constraint};
 use crate::hir_ty_lowering::generics::{check_generic_arg_count, lower_generic_args};
 use crate::middle::resolve_bound_vars as rbv;
@@ -217,7 +219,7 @@ impl AssocItemQSelf {
     fn to_string(&self, tcx: TyCtxt<'_>) -> String {
         match *self {
             Self::Trait(def_id) => tcx.def_path_str(def_id),
-            Self::TyParam(def_id, _) => tcx.hir().ty_param_name(def_id).to_string(),
+            Self::TyParam(def_id, _) => tcx.hir_ty_param_name(def_id).to_string(),
             Self::SelfTyAlias => kw::SelfUpper.to_string(),
         }
     }
@@ -230,12 +232,15 @@ impl AssocItemQSelf {
 /// Use this enum with `<dyn HirTyLowerer>::lower_const_arg` to instruct it with the
 /// desired behavior.
 #[derive(Debug, Clone, Copy)]
-pub enum FeedConstTy {
+pub enum FeedConstTy<'a, 'tcx> {
     /// Feed the type.
     ///
     /// The `DefId` belongs to the const param that we are supplying
     /// this (anon) const arg to.
-    Param(DefId),
+    ///
+    /// The list of generic args is used to instantiate the parameters
+    /// used by the type of the const param specified by `DefId`.
+    Param(DefId, &'a [ty::GenericArg<'tcx>]),
     /// Don't feed the type.
     No,
 }
@@ -296,6 +301,7 @@ pub trait GenericArgsLowerer<'a, 'tcx> {
 
     fn provided_kind(
         &mut self,
+        preceding_args: &[ty::GenericArg<'tcx>],
         param: &ty::GenericParamDef,
         arg: &GenericArg<'tcx>,
     ) -> ty::GenericArg<'tcx>;
@@ -342,8 +348,8 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
             }
 
             rbv::ResolvedArg::EarlyBound(def_id) => {
-                let name = tcx.hir().ty_param_name(def_id);
-                let item_def_id = tcx.hir().ty_param_owner(def_id);
+                let name = tcx.hir_ty_param_name(def_id);
+                let item_def_id = tcx.hir_ty_param_owner(def_id);
                 let generics = tcx.generics_of(item_def_id);
                 let index = generics.param_def_id_to_index[&def_id.to_def_id()];
                 ty::Region::new_early_param(tcx, ty::EarlyParamRegion { index, name })
@@ -479,6 +485,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
 
             fn provided_kind(
                 &mut self,
+                preceding_args: &[ty::GenericArg<'tcx>],
                 param: &ty::GenericParamDef,
                 arg: &GenericArg<'tcx>,
             ) -> ty::GenericArg<'tcx> {
@@ -524,7 +531,10 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                     (GenericParamDefKind::Const { .. }, GenericArg::Const(ct)) => self
                         .lowerer
                         // Ambig portions of `ConstArg` are handled in the match arm below
-                        .lower_const_arg(ct.as_unambig_ct(), FeedConstTy::Param(param.def_id))
+                        .lower_const_arg(
+                            ct.as_unambig_ct(),
+                            FeedConstTy::Param(param.def_id, preceding_args),
+                        )
                         .into(),
                     (&GenericParamDefKind::Const { .. }, GenericArg::Infer(inf)) => {
                         self.lowerer.ct_infer(Some(param), inf.span).into()
@@ -580,8 +590,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                         let ty = tcx
                             .at(self.span)
                             .type_of(param.def_id)
-                            .no_bound_vars()
-                            .expect("const parameter types cannot be generic");
+                            .instantiate(tcx, preceding_args);
                         if let Err(guar) = ty.error_reported() {
                             return ty::Const::new_error(tcx, guar).into();
                         }
@@ -691,7 +700,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         constness: hir::BoundConstness,
         polarity: hir::BoundPolarity,
         self_ty: Ty<'tcx>,
-        bounds: &mut Bounds<'tcx>,
+        bounds: &mut Vec<(ty::Clause<'tcx>, Span)>,
         predicate_filter: PredicateFilter,
     ) -> GenericArgCountResult {
         let trait_def_id = trait_ref.trait_def_id().unwrap_or_else(|| FatalError.raise());
@@ -720,6 +729,8 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
             bound_vars,
         );
 
+        debug!(?poly_trait_ref);
+
         let polarity = match polarity {
             rustc_ast::BoundPolarity::Positive => ty::PredicatePolarity::Positive,
             rustc_ast::BoundPolarity::Negative(_) => ty::PredicatePolarity::Negative,
@@ -740,6 +751,26 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 return arg_count;
             }
         };
+
+        // We deal with const conditions later.
+        match predicate_filter {
+            PredicateFilter::All
+            | PredicateFilter::SelfOnly
+            | PredicateFilter::SelfTraitThatDefines(..)
+            | PredicateFilter::SelfAndAssociatedTypeBounds => {
+                let bound = poly_trait_ref.map_bound(|trait_ref| {
+                    ty::ClauseKind::Trait(ty::TraitPredicate { trait_ref, polarity })
+                });
+                let bound = (bound.upcast(tcx), span);
+                // FIXME(-Znext-solver): We can likely remove this hack once the new trait solver lands.
+                if tcx.is_lang_item(trait_def_id, rustc_hir::LangItem::Sized) {
+                    bounds.insert(0, bound);
+                } else {
+                    bounds.push(bound);
+                }
+            }
+            PredicateFilter::ConstIfConst | PredicateFilter::SelfConstIfConst => {}
+        }
 
         if let hir::BoundConstness::Always(span) | hir::BoundConstness::Maybe(span) = constness
             && !self.tcx().is_const_trait(trait_def_id)
@@ -765,58 +796,53 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 suggestion_pre,
                 suggestion,
             });
-        }
-
-        match predicate_filter {
-            // This is only concerned with trait predicates.
-            PredicateFilter::SelfTraitThatDefines(..) => {
-                bounds.push_trait_bound(tcx, poly_trait_ref, span, polarity);
-            }
-            PredicateFilter::All
-            | PredicateFilter::SelfOnly
-            | PredicateFilter::SelfAndAssociatedTypeBounds => {
-                debug!(?poly_trait_ref);
-                bounds.push_trait_bound(tcx, poly_trait_ref, span, polarity);
-
-                match constness {
-                    hir::BoundConstness::Always(span) => {
-                        if polarity == ty::PredicatePolarity::Positive {
-                            bounds.push_const_bound(
-                                tcx,
-                                poly_trait_ref,
-                                ty::BoundConstness::Const,
-                                span,
-                            );
+        } else {
+            match predicate_filter {
+                // This is only concerned with trait predicates.
+                PredicateFilter::SelfTraitThatDefines(..) => {}
+                PredicateFilter::All
+                | PredicateFilter::SelfOnly
+                | PredicateFilter::SelfAndAssociatedTypeBounds => {
+                    match constness {
+                        hir::BoundConstness::Always(span) => {
+                            if polarity == ty::PredicatePolarity::Positive {
+                                bounds.push((
+                                    poly_trait_ref
+                                        .to_host_effect_clause(tcx, ty::BoundConstness::Const),
+                                    span,
+                                ));
+                            }
                         }
+                        hir::BoundConstness::Maybe(_) => {
+                            // We don't emit a const bound here, since that would mean that we
+                            // unconditionally need to prove a `HostEffect` predicate, even when
+                            // the predicates are being instantiated in a non-const context. This
+                            // is instead handled in the `const_conditions` query.
+                        }
+                        hir::BoundConstness::Never => {}
                     }
-                    hir::BoundConstness::Maybe(_) => {
-                        // We don't emit a const bound here, since that would mean that we
-                        // unconditionally need to prove a `HostEffect` predicate, even when
-                        // the predicates are being instantiated in a non-const context. This
-                        // is instead handled in the `const_conditions` query.
+                }
+                // On the flip side, when filtering `ConstIfConst` bounds, we only need to convert
+                // `~const` bounds. All other predicates are handled in their respective queries.
+                //
+                // Note that like `PredicateFilter::SelfOnly`, we don't need to do any filtering
+                // here because we only call this on self bounds, and deal with the recursive case
+                // in `lower_assoc_item_constraint`.
+                PredicateFilter::ConstIfConst | PredicateFilter::SelfConstIfConst => {
+                    match constness {
+                        hir::BoundConstness::Maybe(span) => {
+                            if polarity == ty::PredicatePolarity::Positive {
+                                bounds.push((
+                                    poly_trait_ref
+                                        .to_host_effect_clause(tcx, ty::BoundConstness::Maybe),
+                                    span,
+                                ));
+                            }
+                        }
+                        hir::BoundConstness::Always(_) | hir::BoundConstness::Never => {}
                     }
-                    hir::BoundConstness::Never => {}
                 }
             }
-            // On the flip side, when filtering `ConstIfConst` bounds, we only need to convert
-            // `~const` bounds. All other predicates are handled in their respective queries.
-            //
-            // Note that like `PredicateFilter::SelfOnly`, we don't need to do any filtering
-            // here because we only call this on self bounds, and deal with the recursive case
-            // in `lower_assoc_item_constraint`.
-            PredicateFilter::ConstIfConst | PredicateFilter::SelfConstIfConst => match constness {
-                hir::BoundConstness::Maybe(span) => {
-                    if polarity == ty::PredicatePolarity::Positive {
-                        bounds.push_const_bound(
-                            tcx,
-                            poly_trait_ref,
-                            ty::BoundConstness::Maybe,
-                            span,
-                        );
-                    }
-                }
-                hir::BoundConstness::Always(_) | hir::BoundConstness::Never => {}
-            },
         }
 
         let mut dup_constraints = FxIndexMap::default();
@@ -1188,14 +1214,11 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                     let msg = format!("expected type, found variant `{assoc_ident}`");
                     self.dcx().span_err(span, msg)
                 } else if qself_ty.is_enum() {
-                    let mut err = struct_span_code_err!(
-                        self.dcx(),
-                        assoc_ident.span,
-                        E0599,
-                        "no variant named `{}` found for enum `{}`",
-                        assoc_ident,
-                        qself_ty,
-                    );
+                    let mut err = self.dcx().create_err(NoVariantNamed {
+                        span: assoc_ident.span,
+                        ident: assoc_ident,
+                        ty: qself_ty,
+                    });
 
                     let adt_def = qself_ty.ty_adt_def().expect("enum is not an ADT");
                     if let Some(variant_name) = find_best_match_for_name(
@@ -1210,11 +1233,10 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                         adt_def.variants().iter().find(|s| s.name == variant_name)
                     {
                         let mut suggestion = vec![(assoc_ident.span, variant_name.to_string())];
-                        if let hir::Node::Stmt(hir::Stmt {
-                            kind: hir::StmtKind::Semi(ref expr),
-                            ..
+                        if let hir::Node::Stmt(&hir::Stmt {
+                            kind: hir::StmtKind::Semi(expr), ..
                         })
-                        | hir::Node::Expr(ref expr) = tcx.parent_hir_node(hir_ref_id)
+                        | hir::Node::Expr(expr) = tcx.parent_hir_node(hir_ref_id)
                             && let hir::ExprKind::Struct(..) = expr.kind
                         {
                             match variant.ctor {
@@ -1657,8 +1679,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         debug!(item_def_id = ?def_id);
 
         // FIXME: document why/how this is different from `tcx.local_parent(def_id)`
-        let parent_def_id =
-            tcx.hir().get_parent_item(tcx.local_def_id_to_hir_id(def_id)).to_def_id();
+        let parent_def_id = tcx.hir_get_parent_item(tcx.local_def_id_to_hir_id(def_id)).to_def_id();
         debug!(?parent_def_id);
 
         // If the trait in segment is the same as the trait defining the item,
@@ -1976,7 +1997,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                     if let Some(hir::Node::Item(&hir::Item {
                         kind: hir::ItemKind::Impl(impl_),
                         ..
-                    })) = tcx.hir().get_if_local(def_id)
+                    })) = tcx.hir_get_if_local(def_id)
                     {
                         err.span_note(impl_.self_ty.span, "not a concrete type");
                     }
@@ -2053,10 +2074,10 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 Ty::new_bound(tcx, debruijn, br)
             }
             Some(rbv::ResolvedArg::EarlyBound(def_id)) => {
-                let item_def_id = tcx.hir().ty_param_owner(def_id);
+                let item_def_id = tcx.hir_ty_param_owner(def_id);
                 let generics = tcx.generics_of(item_def_id);
                 let index = generics.param_def_id_to_index[&def_id.to_def_id()];
-                Ty::new_param(tcx, index, tcx.hir().ty_param_name(def_id))
+                Ty::new_param(tcx, index, tcx.hir_ty_param_name(def_id))
             }
             Some(rbv::ResolvedArg::Error(guar)) => Ty::new_error(tcx, guar),
             arg => bug!("unexpected bound var resolution for {hir_id:?}: {arg:?}"),
@@ -2093,14 +2114,50 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
     pub fn lower_const_arg(
         &self,
         const_arg: &hir::ConstArg<'tcx>,
-        feed: FeedConstTy,
+        feed: FeedConstTy<'_, 'tcx>,
     ) -> Const<'tcx> {
         let tcx = self.tcx();
 
-        if let FeedConstTy::Param(param_def_id) = feed
+        if let FeedConstTy::Param(param_def_id, args) = feed
             && let hir::ConstArgKind::Anon(anon) = &const_arg.kind
         {
-            tcx.feed_anon_const_type(anon.def_id, tcx.type_of(param_def_id));
+            let anon_const_type = tcx.type_of(param_def_id).instantiate(tcx, args);
+
+            // We must error if the instantiated type has any inference variables as we will
+            // use this type to feed the `type_of` and query results must not contain inference
+            // variables otherwise we will ICE.
+            //
+            // We also error if the type contains any regions as effectively any region will wind
+            // up as a region variable in mir borrowck. It would also be somewhat concerning if
+            // hir typeck was using equality but mir borrowck wound up using subtyping as that could
+            // result in a non-infer in hir typeck but a region variable in borrowck.
+            //
+            // FIXME(generic_const_parameter_types): Ideally we remove these errors one day when
+            // we have the ability to intermix typeck of anon const const args with the parent
+            // bodies typeck.
+            if tcx.features().generic_const_parameter_types()
+                && (anon_const_type.has_free_regions() || anon_const_type.has_erased_regions())
+            {
+                let e = tcx.dcx().span_err(
+                    const_arg.span(),
+                    "anonymous constants with lifetimes in their type are not yet supported",
+                );
+                tcx.feed_anon_const_type(anon.def_id, ty::EarlyBinder::bind(Ty::new_error(tcx, e)));
+                return ty::Const::new_error(tcx, e);
+            }
+            if anon_const_type.has_non_region_infer() {
+                let e = tcx.dcx().span_err(
+                    const_arg.span(),
+                    "anonymous constants with inferred types are not yet supported",
+                );
+                tcx.feed_anon_const_type(anon.def_id, ty::EarlyBinder::bind(Ty::new_error(tcx, e)));
+                return ty::Const::new_error(tcx, e);
+            }
+
+            tcx.feed_anon_const_type(
+                anon.def_id,
+                ty::EarlyBinder::bind(tcx.type_of(param_def_id).instantiate(tcx, args)),
+            );
         }
 
         let hir_id = const_arg.hir_id;
@@ -2213,13 +2270,13 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
     fn lower_anon_const(&self, anon: &AnonConst) -> Const<'tcx> {
         let tcx = self.tcx();
 
-        let expr = &tcx.hir().body(anon.body).value;
+        let expr = &tcx.hir_body(anon.body).value;
         debug!(?expr);
 
-        let ty = tcx
-            .type_of(anon.def_id)
-            .no_bound_vars()
-            .expect("const parameter types cannot be generic");
+        // FIXME(generic_const_parameter_types): We should use the proper generic args
+        // here. It's only used as a hint for literals so doesn't matter too much to use the right
+        // generic arguments, just weaker type inference.
+        let ty = tcx.type_of(anon.def_id).instantiate_identity();
 
         match self.try_lower_anon_const_lit(ty, expr) {
             Some(v) => v,
@@ -2382,7 +2439,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 // Impl trait in bindings lower as an infer var with additional
                 // set of type bounds.
                 let self_ty = self.ty_infer(None, hir_ty.span);
-                let mut bounds = Bounds::default();
+                let mut bounds = Vec::new();
                 self.lower_bounds(
                     self_ty,
                     hir_bounds.iter(),
@@ -2390,11 +2447,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                     ty::List::empty(),
                     PredicateFilter::All,
                 );
-                self.register_trait_ascription_bounds(
-                    bounds.clauses().collect(),
-                    hir_ty.hir_id,
-                    hir_ty.span,
-                );
+                self.register_trait_ascription_bounds(bounds, hir_ty.hir_id, hir_ty.span);
                 self_ty
             }
             // If we encounter a type relative path with RTN generics, then it must have

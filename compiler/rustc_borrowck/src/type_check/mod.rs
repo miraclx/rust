@@ -19,7 +19,6 @@ use rustc_infer::infer::{
     BoundRegion, BoundRegionConversionTime, InferCtxt, NllRegionVariableOrigin,
 };
 use rustc_infer::traits::PredicateObligations;
-use rustc_middle::mir::tcx::PlaceTy;
 use rustc_middle::mir::visit::{NonMutatingUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::*;
 use rustc_middle::traits::query::NoSolution;
@@ -39,7 +38,7 @@ use rustc_mir_dataflow::move_paths::MoveData;
 use rustc_mir_dataflow::points::DenseLocationMap;
 use rustc_span::def_id::CRATE_DEF_ID;
 use rustc_span::source_map::Spanned;
-use rustc_span::{DUMMY_SP, Span, sym};
+use rustc_span::{Span, sym};
 use rustc_trait_selection::traits::query::type_op::custom::scrape_region_constraints;
 use rustc_trait_selection::traits::query::type_op::{TypeOp, TypeOpOutput};
 use tracing::{debug, instrument, trace};
@@ -52,7 +51,6 @@ use crate::polonius::legacy::{PoloniusFacts, PoloniusLocationTable};
 use crate::polonius::{PoloniusContext, PoloniusLivenessContext};
 use crate::region_infer::TypeTest;
 use crate::region_infer::values::{LivenessValues, PlaceholderIndex, PlaceholderIndices};
-use crate::renumber::RegionCtxt;
 use crate::session_diagnostics::{MoveUnsized, SimdIntrinsicArgConst};
 use crate::type_check::free_region_relations::{CreateResult, UniversalRegionRelations};
 use crate::universal_regions::{DefiningTy, UniversalRegions};
@@ -457,38 +455,38 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'tcx> {
     fn visit_local_decl(&mut self, local: Local, local_decl: &LocalDecl<'tcx>) {
         self.super_local_decl(local, local_decl);
 
-        if let Some(user_ty) = &local_decl.user_ty {
-            for (user_ty, span) in user_ty.projections_and_spans() {
-                let ty = if !local_decl.is_nonref_binding() {
-                    // If we have a binding of the form `let ref x: T = ..`
-                    // then remove the outermost reference so we can check the
-                    // type annotation for the remaining type.
-                    if let ty::Ref(_, rty, _) = local_decl.ty.kind() {
-                        *rty
-                    } else {
-                        bug!("{:?} with ref binding has wrong type {}", local, local_decl.ty);
-                    }
-                } else {
-                    local_decl.ty
-                };
+        for user_ty in
+            local_decl.user_ty.as_deref().into_iter().flat_map(UserTypeProjections::projections)
+        {
+            let span = self.typeck.user_type_annotations[user_ty.base].span;
 
-                if let Err(terr) = self.typeck.relate_type_and_user_type(
-                    ty,
-                    ty::Invariant,
-                    user_ty,
-                    Locations::All(*span),
-                    ConstraintCategory::TypeAnnotation(AnnotationSource::Declaration),
-                ) {
-                    span_mirbug!(
-                        self,
-                        local,
-                        "bad user type on variable {:?}: {:?} != {:?} ({:?})",
-                        local,
-                        local_decl.ty,
-                        local_decl.user_ty,
-                        terr,
-                    );
-                }
+            let ty = if local_decl.is_nonref_binding() {
+                local_decl.ty
+            } else if let &ty::Ref(_, rty, _) = local_decl.ty.kind() {
+                // If we have a binding of the form `let ref x: T = ..`
+                // then remove the outermost reference so we can check the
+                // type annotation for the remaining type.
+                rty
+            } else {
+                bug!("{:?} with ref binding has wrong type {}", local, local_decl.ty);
+            };
+
+            if let Err(terr) = self.typeck.relate_type_and_user_type(
+                ty,
+                ty::Invariant,
+                user_ty,
+                Locations::All(span),
+                ConstraintCategory::TypeAnnotation(AnnotationSource::Declaration),
+            ) {
+                span_mirbug!(
+                    self,
+                    local,
+                    "bad user type on variable {:?}: {:?} != {:?} ({:?})",
+                    local,
+                    local_decl.ty,
+                    local_decl.user_ty,
+                    terr,
+                );
             }
         }
     }
@@ -2122,35 +2120,31 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                                 //
                                 // Note that other checks (such as denying `dyn Send` -> `dyn
                                 // Debug`) are in `rustc_hir_typeck`.
-                                if let ty::Dynamic(src_tty, ..) = src_tail.kind()
-                                    && let ty::Dynamic(dst_tty, ..) = dst_tail.kind()
+                                if let ty::Dynamic(src_tty, _src_lt, _) = *src_tail.kind()
+                                    && let ty::Dynamic(dst_tty, dst_lt, _) = *dst_tail.kind()
                                     && src_tty.principal().is_some()
                                     && dst_tty.principal().is_some()
                                 {
                                     // Remove auto traits.
                                     // Auto trait checks are handled in `rustc_hir_typeck` as FCW.
-                                    let src_obj = tcx.mk_ty_from_kind(ty::Dynamic(
+                                    let src_obj = Ty::new_dynamic(
+                                        tcx,
                                         tcx.mk_poly_existential_predicates(
                                             &src_tty.without_auto_traits().collect::<Vec<_>>(),
                                         ),
-                                        tcx.lifetimes.re_static,
+                                        // FIXME: Once we disallow casting `*const dyn Trait + 'short`
+                                        // to `*const dyn Trait + 'long`, then this can just be `src_lt`.
+                                        dst_lt,
                                         ty::Dyn,
-                                    ));
-                                    let dst_obj = tcx.mk_ty_from_kind(ty::Dynamic(
+                                    );
+                                    let dst_obj = Ty::new_dynamic(
+                                        tcx,
                                         tcx.mk_poly_existential_predicates(
                                             &dst_tty.without_auto_traits().collect::<Vec<_>>(),
                                         ),
-                                        tcx.lifetimes.re_static,
+                                        dst_lt,
                                         ty::Dyn,
-                                    ));
-
-                                    // Replace trait object lifetimes with fresh vars, to allow
-                                    // casts like
-                                    // `*mut dyn FnOnce() + 'a` -> `*mut dyn FnOnce() + 'static`
-                                    let src_obj =
-                                        freshen_single_trait_object_lifetime(self.infcx, src_obj);
-                                    let dst_obj =
-                                        freshen_single_trait_object_lifetime(self.infcx, dst_obj);
+                                    );
 
                                     debug!(?src_tty, ?dst_tty, ?src_obj, ?dst_obj);
 
@@ -2707,17 +2701,4 @@ impl<'tcx> TypeOp<'tcx> for InstantiateOpaqueType<'tcx> {
         output.error_info = Some(self);
         Ok(output)
     }
-}
-
-fn freshen_single_trait_object_lifetime<'tcx>(
-    infcx: &BorrowckInferCtxt<'tcx>,
-    ty: Ty<'tcx>,
-) -> Ty<'tcx> {
-    let &ty::Dynamic(tty, _, dyn_kind @ ty::Dyn) = ty.kind() else { bug!("expected trait object") };
-
-    let fresh = infcx
-        .next_region_var(rustc_infer::infer::RegionVariableOrigin::MiscVariable(DUMMY_SP), || {
-            RegionCtxt::Unknown
-        });
-    infcx.tcx.mk_ty_from_kind(ty::Dynamic(tty, fresh, dyn_kind))
 }

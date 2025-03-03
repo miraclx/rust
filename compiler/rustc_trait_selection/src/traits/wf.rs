@@ -289,7 +289,7 @@ fn extend_cause_with_original_assoc_item_obligation<'tcx>(
             && let Some(impl_item) =
                 items.iter().find(|item| item.id.owner_id.to_def_id() == impl_item_id)
         {
-            Some(tcx.hir().impl_item(impl_item.id).expect_type().span)
+            Some(tcx.hir_impl_item(impl_item.id).expect_type().span)
         } else {
             None
         }
@@ -904,19 +904,14 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
                 // FIXME(#27579) RFC also considers adding trait
                 // obligations that don't refer to Self and
                 // checking those
-
-                let defer_to_coercion = tcx.features().dyn_compatible_for_dispatch();
-
-                if !defer_to_coercion {
-                    if let Some(principal) = data.principal_def_id() {
-                        self.out.push(traits::Obligation::with_depth(
-                            tcx,
-                            self.cause(ObligationCauseCode::WellFormed(None)),
-                            self.recursion_depth,
-                            self.param_env,
-                            ty::Binder::dummy(ty::PredicateKind::DynCompatible(principal)),
-                        ));
-                    }
+                if let Some(principal) = data.principal_def_id() {
+                    self.out.push(traits::Obligation::with_depth(
+                        tcx,
+                        self.cause(ObligationCauseCode::WellFormed(None)),
+                        self.recursion_depth,
+                        self.param_env,
+                        ty::Binder::dummy(ty::PredicateKind::DynCompatible(principal)),
+                    ));
                 }
             }
 

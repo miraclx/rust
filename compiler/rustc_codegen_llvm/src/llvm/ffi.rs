@@ -954,6 +954,17 @@ bitflags! {
     }
 }
 
+// These values **must** match with LLVMGEPNoWrapFlags
+bitflags! {
+    #[repr(transparent)]
+    #[derive(Default)]
+    pub struct GEPNoWrapFlags : c_uint {
+        const InBounds = 1 << 0;
+        const NUSW = 1 << 1;
+        const NUW = 1 << 2;
+    }
+}
+
 unsafe extern "C" {
     pub type ModuleBuffer;
 }
@@ -1454,21 +1465,14 @@ unsafe extern "C" {
 
     pub(crate) fn LLVMBuildStore<'a>(B: &Builder<'a>, Val: &'a Value, Ptr: &'a Value) -> &'a Value;
 
-    pub(crate) fn LLVMBuildGEP2<'a>(
+    pub(crate) fn LLVMBuildGEPWithNoWrapFlags<'a>(
         B: &Builder<'a>,
         Ty: &'a Type,
         Pointer: &'a Value,
         Indices: *const &'a Value,
         NumIndices: c_uint,
         Name: *const c_char,
-    ) -> &'a Value;
-    pub(crate) fn LLVMBuildInBoundsGEP2<'a>(
-        B: &Builder<'a>,
-        Ty: &'a Type,
-        Pointer: &'a Value,
-        Indices: *const &'a Value,
-        NumIndices: c_uint,
-        Name: *const c_char,
+        Flags: GEPNoWrapFlags,
     ) -> &'a Value;
 
     // Casts
@@ -2421,7 +2425,9 @@ unsafe extern "C" {
         NoPrepopulatePasses: bool,
         VerifyIR: bool,
         LintIR: bool,
-        UseThinLTOBuffers: bool,
+        ThinLTOBuffer: Option<&mut *mut ThinLTOBuffer>,
+        EmitThinLTO: bool,
+        EmitThinLTOSummary: bool,
         MergeFunctions: bool,
         UnrollLoops: bool,
         SLPVectorize: bool,

@@ -218,6 +218,8 @@ pub struct Config {
     pub stderr_is_tty: bool,
 
     pub on_fail: Option<String>,
+    pub explicit_stage_from_cli: bool,
+    pub explicit_stage_from_config: bool,
     pub stage: u32,
     pub keep_stage: Vec<u32>,
     pub keep_stage_std: Vec<u32>,
@@ -325,6 +327,9 @@ pub struct Config {
     pub hosts: Vec<TargetSelection>,
     pub targets: Vec<TargetSelection>,
     pub local_rebuild: bool,
+    #[cfg(not(test))]
+    jemalloc: bool,
+    #[cfg(test)]
     pub jemalloc: bool,
     pub control_flow_guard: bool,
     pub ehcont_guard: bool,
@@ -643,6 +648,7 @@ pub struct Target {
     pub no_std: bool,
     pub codegen_backends: Option<Vec<String>>,
     pub optimized_compiler_builtins: Option<bool>,
+    pub jemalloc: Option<bool>,
 }
 
 impl Target {
@@ -1234,6 +1240,7 @@ define_config! {
         codegen_backends: Option<Vec<String>> = "codegen-backends",
         runner: Option<String> = "runner",
         optimized_compiler_builtins: Option<bool> = "optimized-compiler-builtins",
+        jemalloc: Option<bool> = "jemalloc",
     }
 }
 
@@ -1770,7 +1777,11 @@ impl Config {
 
         let is_user_configured_rust_channel =
             if let Some(channel) = toml.rust.as_ref().and_then(|r| r.channel.clone()) {
-                config.channel = channel;
+                if channel == "auto-detect" {
+                    config.channel = ci_channel.into();
+                } else {
+                    config.channel = channel;
+                }
                 true
             } else {
                 false
@@ -2161,6 +2172,7 @@ impl Config {
                 target.profiler = cfg.profiler;
                 target.rpath = cfg.rpath;
                 target.optimized_compiler_builtins = cfg.optimized_compiler_builtins;
+                target.jemalloc = cfg.jemalloc;
 
                 if let Some(ref backends) = cfg.codegen_backends {
                     let available_backends = ["llvm", "cranelift", "gcc"];
@@ -2317,6 +2329,14 @@ impl Config {
         config.compiletest_diff_tool = compiletest_diff_tool;
 
         let download_rustc = config.download_rustc_commit.is_some();
+        config.explicit_stage_from_cli = flags.stage.is_some();
+        config.explicit_stage_from_config = test_stage.is_some()
+            || build_stage.is_some()
+            || doc_stage.is_some()
+            || dist_stage.is_some()
+            || install_stage.is_some()
+            || check_stage.is_some()
+            || bench_stage.is_some();
         // See https://github.com/rust-lang/compiler-team/issues/326
         config.stage = match config.cmd {
             Subcommand::Check { .. } => flags.stage.or(check_stage).unwrap_or(0),
@@ -2324,21 +2344,21 @@ impl Config {
             Subcommand::Doc { .. } => {
                 flags.stage.or(doc_stage).unwrap_or(if download_rustc { 2 } else { 0 })
             }
-            Subcommand::Build { .. } => {
+            Subcommand::Build => {
                 flags.stage.or(build_stage).unwrap_or(if download_rustc { 2 } else { 1 })
             }
             Subcommand::Test { .. } | Subcommand::Miri { .. } => {
                 flags.stage.or(test_stage).unwrap_or(if download_rustc { 2 } else { 1 })
             }
             Subcommand::Bench { .. } => flags.stage.or(bench_stage).unwrap_or(2),
-            Subcommand::Dist { .. } => flags.stage.or(dist_stage).unwrap_or(2),
-            Subcommand::Install { .. } => flags.stage.or(install_stage).unwrap_or(2),
+            Subcommand::Dist => flags.stage.or(dist_stage).unwrap_or(2),
+            Subcommand::Install => flags.stage.or(install_stage).unwrap_or(2),
             Subcommand::Perf { .. } => flags.stage.unwrap_or(1),
             // These are all bootstrap tools, which don't depend on the compiler.
             // The stage we pass shouldn't matter, but use 0 just in case.
             Subcommand::Clean { .. }
             | Subcommand::Clippy { .. }
-            | Subcommand::Fix { .. }
+            | Subcommand::Fix
             | Subcommand::Run { .. }
             | Subcommand::Setup { .. }
             | Subcommand::Format { .. }
@@ -2353,10 +2373,10 @@ impl Config {
                 Subcommand::Test { .. }
                 | Subcommand::Miri { .. }
                 | Subcommand::Doc { .. }
-                | Subcommand::Build { .. }
+                | Subcommand::Build
                 | Subcommand::Bench { .. }
-                | Subcommand::Dist { .. }
-                | Subcommand::Install { .. } => {
+                | Subcommand::Dist
+                | Subcommand::Install => {
                     assert_eq!(
                         config.stage, 2,
                         "x.py should be run with `--stage 2` on CI, but was run with `--stage {}`",
@@ -2366,7 +2386,7 @@ impl Config {
                 Subcommand::Clean { .. }
                 | Subcommand::Check { .. }
                 | Subcommand::Clippy { .. }
-                | Subcommand::Fix { .. }
+                | Subcommand::Fix
                 | Subcommand::Run { .. }
                 | Subcommand::Setup { .. }
                 | Subcommand::Format { .. }
@@ -2384,6 +2404,10 @@ impl Config {
             DryRun::Disabled => false,
             DryRun::SelfCheck | DryRun::UserSelected => true,
         }
+    }
+
+    pub fn is_explicit_stage(&self) -> bool {
+        self.explicit_stage_from_cli || self.explicit_stage_from_config
     }
 
     /// Runs a command, printing out nice contextual information if it fails.
@@ -2726,6 +2750,10 @@ impl Config {
             .unwrap_or(&self.rust_codegen_backends)
     }
 
+    pub fn jemalloc(&self, target: TargetSelection) -> bool {
+        self.target_config.get(&target).and_then(|cfg| cfg.jemalloc).unwrap_or(self.jemalloc)
+    }
+
     pub fn default_codegen_backend(&self, target: TargetSelection) -> Option<String> {
         self.codegen_backends(target).first().cloned()
     }
@@ -2747,8 +2775,17 @@ impl Config {
     /// tarball). Typically [`crate::Build::require_submodule`] should be
     /// used instead to provide a nice error to the user if the submodule is
     /// missing.
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(
+            level = "trace",
+            name = "Config::update_submodule",
+            skip_all,
+            fields(relative_path = ?relative_path),
+        ),
+    )]
     pub(crate) fn update_submodule(&self, relative_path: &str) {
-        if !self.submodules() {
+        if self.rust_info.is_from_tarball() || !self.submodules() {
             return;
         }
 

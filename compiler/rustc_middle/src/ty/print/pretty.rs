@@ -232,7 +232,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
         f: F,
     ) -> Result<(), PrintError>
     where
-        T: Print<'tcx, Self> + TypeFoldable<TyCtxt<'tcx>>,
+        T: TypeFoldable<TyCtxt<'tcx>>,
     {
         f(value.as_ref().skip_binder(), self)
     }
@@ -1056,7 +1056,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
         // Insert parenthesis around (Fn(A, B) -> C) if the opaque ty has more than one other trait
         let paren_needed = fn_traits.len() > 1 || traits.len() > 0 || !has_sized_bound;
 
-        for ((bound_args, is_async), entry) in fn_traits {
+        for ((bound_args_and_self_ty, is_async), entry) in fn_traits {
             write!(self, "{}", if first { "" } else { " + " })?;
             write!(self, "{}", if paren_needed { "(" } else { "" })?;
 
@@ -1067,7 +1067,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             };
 
             if let Some(return_ty) = entry.return_ty {
-                self.wrap_binder(&bound_args, |args, cx| {
+                self.wrap_binder(&bound_args_and_self_ty, |(args, _), cx| {
                     define_scoped_cx!(cx);
                     p!(write("{}", tcx.item_name(trait_def_id)));
                     p!("(");
@@ -1093,9 +1093,13 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             } else {
                 // Otherwise, render this like a regular trait.
                 traits.insert(
-                    bound_args.map_bound(|args| ty::TraitPredicate {
+                    bound_args_and_self_ty.map_bound(|(args, self_ty)| ty::TraitPredicate {
                         polarity: ty::PredicatePolarity::Positive,
-                        trait_ref: ty::TraitRef::new(tcx, trait_def_id, [Ty::new_tup(tcx, args)]),
+                        trait_ref: ty::TraitRef::new(
+                            tcx,
+                            trait_def_id,
+                            [self_ty, Ty::new_tup(tcx, args)],
+                        ),
                     }),
                     FxIndexMap::default(),
                 );
@@ -1229,7 +1233,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             FxIndexMap<DefId, ty::Binder<'tcx, Term<'tcx>>>,
         >,
         fn_traits: &mut FxIndexMap<
-            (ty::Binder<'tcx, &'tcx ty::List<Ty<'tcx>>>, bool),
+            (ty::Binder<'tcx, (&'tcx ty::List<Ty<'tcx>>, Ty<'tcx>)>, bool),
             OpaqueFnEntry<'tcx>,
         >,
     ) {
@@ -1249,7 +1253,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             && let ty::Tuple(types) = *trait_pred.skip_binder().trait_ref.args.type_at(1).kind()
         {
             let entry = fn_traits
-                .entry((trait_pred.rebind(types), is_async))
+                .entry((trait_pred.rebind((types, trait_pred.skip_binder().self_ty())), is_async))
                 .or_insert_with(|| OpaqueFnEntry { kind, return_ty: None });
             if kind.extends(entry.kind) {
                 entry.kind = kind;
@@ -1512,10 +1516,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             ty::ExprKind::Binop(op) => {
                 let (_, _, c1, c2) = expr.binop_args();
 
-                let precedence = |binop: crate::mir::BinOp| {
-                    use rustc_ast::util::parser::AssocOp;
-                    AssocOp::from_ast_binop(binop.to_hir_binop()).precedence()
-                };
+                let precedence = |binop: crate::mir::BinOp| binop.to_hir_binop().precedence();
                 let op_precedence = precedence(op);
                 let formatted_op = op.to_hir_binop().as_str();
                 let (lhs_parenthesized, rhs_parenthesized) = match (c1.kind(), c2.kind()) {
@@ -2379,7 +2380,7 @@ impl<'tcx> PrettyPrinter<'tcx> for FmtPrinter<'_, 'tcx> {
         f: C,
     ) -> Result<(), PrintError>
     where
-        T: Print<'tcx, Self> + TypeFoldable<TyCtxt<'tcx>>,
+        T: TypeFoldable<TyCtxt<'tcx>>,
     {
         self.pretty_wrap_binder(value, f)
     }
@@ -2633,7 +2634,7 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
         value: &ty::Binder<'tcx, T>,
     ) -> Result<(T, UnordMap<ty::BoundRegion, ty::Region<'tcx>>), fmt::Error>
     where
-        T: Print<'tcx, Self> + TypeFoldable<TyCtxt<'tcx>>,
+        T: TypeFoldable<TyCtxt<'tcx>>,
     {
         fn name_by_region_index(
             index: usize,
@@ -2814,7 +2815,7 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
         f: C,
     ) -> Result<(), fmt::Error>
     where
-        T: Print<'tcx, Self> + TypeFoldable<TyCtxt<'tcx>>,
+        T: TypeFoldable<TyCtxt<'tcx>>,
     {
         let old_region_index = self.region_index;
         let (new_value, _) = self.name_all_regions(value)?;
@@ -2894,12 +2895,15 @@ where
 /// Wrapper type for `ty::TraitRef` which opts-in to pretty printing only
 /// the trait path. That is, it will print `Trait<U>` instead of
 /// `<T as Trait<U>>`.
-#[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift)]
+#[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift, Hash)]
 pub struct TraitRefPrintOnlyTraitPath<'tcx>(ty::TraitRef<'tcx>);
 
 impl<'tcx> rustc_errors::IntoDiagArg for TraitRefPrintOnlyTraitPath<'tcx> {
-    fn into_diag_arg(self) -> rustc_errors::DiagArgValue {
-        self.to_string().into_diag_arg()
+    fn into_diag_arg(self, path: &mut Option<std::path::PathBuf>) -> rustc_errors::DiagArgValue {
+        ty::tls::with(|tcx| {
+            let trait_ref = tcx.short_string(self, path);
+            rustc_errors::DiagArgValue::Str(std::borrow::Cow::Owned(trait_ref))
+        })
     }
 }
 
@@ -2911,12 +2915,15 @@ impl<'tcx> fmt::Debug for TraitRefPrintOnlyTraitPath<'tcx> {
 
 /// Wrapper type for `ty::TraitRef` which opts-in to pretty printing only
 /// the trait path, and additionally tries to "sugar" `Fn(...)` trait bounds.
-#[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift)]
+#[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift, Hash)]
 pub struct TraitRefPrintSugared<'tcx>(ty::TraitRef<'tcx>);
 
 impl<'tcx> rustc_errors::IntoDiagArg for TraitRefPrintSugared<'tcx> {
-    fn into_diag_arg(self) -> rustc_errors::DiagArgValue {
-        self.to_string().into_diag_arg()
+    fn into_diag_arg(self, path: &mut Option<std::path::PathBuf>) -> rustc_errors::DiagArgValue {
+        ty::tls::with(|tcx| {
+            let trait_ref = tcx.short_string(self, path);
+            rustc_errors::DiagArgValue::Str(std::borrow::Cow::Owned(trait_ref))
+        })
     }
 }
 
@@ -3299,13 +3306,12 @@ define_print_and_forward_display! {
 
 fn for_each_def(tcx: TyCtxt<'_>, mut collect_fn: impl for<'b> FnMut(&'b Ident, Namespace, DefId)) {
     // Iterate all local crate items no matter where they are defined.
-    let hir = tcx.hir();
-    for id in hir.items() {
+    for id in tcx.hir_free_items() {
         if matches!(tcx.def_kind(id.owner_id), DefKind::Use) {
             continue;
         }
 
-        let item = hir.item(id);
+        let item = tcx.hir_item(id);
         if item.ident.name == kw::Empty {
             continue;
         }
