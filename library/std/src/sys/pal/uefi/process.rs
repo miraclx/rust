@@ -388,7 +388,7 @@ mod uefi_command_internal {
             }
         }
 
-        pub fn start_image(&mut self) -> io::Result<r_efi::efi::Status> {
+        pub(crate) fn start_image(&mut self) -> io::Result<r_efi::efi::Status> {
             self.update_st_crc32()?;
 
             // Use our system table instead of the default one
@@ -613,7 +613,7 @@ mod uefi_command_internal {
             OsString::from_wide(&self._buffer)
                 .into_string()
                 .map(Into::into)
-                .map_err(|_| const_error!(io::ErrorKind::Other, "utf8 conversion failed"))
+                .map_err(|_| const_error!(io::ErrorKind::Other, "UTF-8 conversion failed"))
         }
 
         extern "efiapi" fn reset(

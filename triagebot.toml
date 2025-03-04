@@ -207,7 +207,7 @@ trigger_files = [
     "tests/rustdoc",
     "tests/rustdoc-ui",
     "tests/rustdoc-gui",
-    "tests/rustdoc-js",
+    "tests/rustdoc-js/",
     "tests/rustdoc-js-std",
     "tests/rustdoc-json",
 
@@ -706,7 +706,11 @@ cc = ["@antoyo", "@GuillaumeGomez"]
 
 [mentions."compiler/rustc_const_eval/src/"]
 message = "Some changes occurred to the CTFE machinery"
-cc = ["@rust-lang/wg-const-eval"]
+cc = ["@RalfJung", "@oli-obk", "@lcnr"]
+
+[mentions."compiler/rustc_const_eval/src/check_consts"]
+message = "Some changes occurred to constck"
+cc = ["@fee1-dead"]
 
 [mentions."compiler/rustc_const_eval/src/interpret"]
 message = "Some changes occurred to the CTFE / Miri interpreter"
@@ -730,7 +734,7 @@ cc = ["@compiler-errors", "@lcnr"]
 
 [mentions."compiler/rustc_middle/src/mir/interpret"]
 message = "Some changes occurred to the CTFE / Miri interpreter"
-cc = ["@rust-lang/miri", "@rust-lang/wg-const-eval"]
+cc = ["@rust-lang/miri", "@RalfJung", "@oli-obk", "@lcnr"]
 
 [mentions."compiler/rustc_mir_transform/src/"]
 message = "Some changes occurred to MIR optimizations"
@@ -771,7 +775,7 @@ cc = ["@fmease"]
 message = "Some changes occurred in diagnostic error codes"
 cc = ["@GuillaumeGomez"]
 
-[mentions."compiler/rustc_mir_build/src/build/matches"]
+[mentions."compiler/rustc_mir_build/src/builder/matches"]
 message = "Some changes occurred in match lowering"
 cc = ["@Nadrieril"]
 
@@ -803,7 +807,7 @@ message = """
 Some changes occurred to the intrinsics. Make sure the CTFE / Miri interpreter
 gets adapted for the changes, if necessary.
 """
-cc = ["@rust-lang/miri", "@rust-lang/wg-const-eval"]
+cc = ["@rust-lang/miri", "@RalfJung", "@oli-obk", "@lcnr"]
 
 [mentions."library/portable-simd"]
 message = """
@@ -1031,7 +1035,7 @@ cc = ["@rust-lang/project-exploit-mitigations", "@rcvalle"]
 message = "Some changes occurred in coverage instrumentation."
 cc = ["@Zalathar"]
 
-[mentions."compiler/rustc_mir_build/src/build/coverageinfo.rs"]
+[mentions."compiler/rustc_mir_build/src/builder/coverageinfo.rs"]
 message = "Some changes occurred in coverage instrumentation."
 cc = ["@Zalathar"]
 
@@ -1081,7 +1085,6 @@ warn_non_default_branch.enable = true
 contributing_url = "https://rustc-dev-guide.rust-lang.org/getting-started.html"
 users_on_vacation = [
     "jyn514",
-    "workingjubilee",
 ]
 
 [[assign.warn_non_default_branch.exceptions]]
@@ -1261,7 +1264,7 @@ project-exploit-mitigations = [
 "/compiler/rustc_middle/src/ty" =                        ["compiler", "types"]
 "/compiler/rustc_const_eval/src/interpret" =             ["compiler", "mir"]
 "/compiler/rustc_const_eval/src/transform" =             ["compiler", "mir-opt"]
-"/compiler/rustc_mir_build/src/build" =                  ["compiler", "mir"]
+"/compiler/rustc_mir_build/src/builder" =                ["compiler", "mir"]
 "/compiler/rustc_mir_transform" =                        ["compiler", "mir", "mir-opt"]
 "/compiler/rustc_smir" =                                 ["project-stable-mir"]
 "/compiler/rustc_parse" =                                ["compiler", "parser"]
@@ -1304,7 +1307,7 @@ project-exploit-mitigations = [
 "/tests/rustdoc" =                                       ["rustdoc"]
 "/tests/rustdoc-gui" =                                   ["rustdoc"]
 "/tests/rustdoc-js-std" =                                ["rustdoc"]
-"/tests/rustdoc-js" =                                    ["rustdoc"]
+"/tests/rustdoc-js/" =                                   ["rustdoc"]
 "/tests/rustdoc-json" =                                  ["@aDotInTheVoid"]
 "/tests/rustdoc-ui" =                                    ["rustdoc"]
 "/tests/ui" =                                            ["compiler"]

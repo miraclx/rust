@@ -27,7 +27,7 @@ pub use intrinsic::IntrinsicDef;
 use rustc_abi::{Align, FieldIdx, Integer, IntegerType, ReprFlags, ReprOptions, VariantIdx};
 use rustc_ast::expand::StrippedCfgItem;
 use rustc_ast::node_id::NodeMap;
-pub use rustc_ast_ir::{Movability, Mutability, try_visit};
+use rustc_attr_parsing::AttributeKind;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_data_structures::intern::Interned;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
@@ -122,6 +122,7 @@ pub mod normalize_erasing_regions;
 pub mod pattern;
 pub mod print;
 pub mod relate;
+pub mod significant_drop_order;
 pub mod trait_def;
 pub mod util;
 pub mod visit;
@@ -180,7 +181,7 @@ pub struct ResolverGlobalCtxt {
     pub confused_type_with_std_module: FxIndexMap<Span, Span>,
     pub doc_link_resolutions: FxIndexMap<LocalDefId, DocLinkResMap>,
     pub doc_link_traits_in_scope: FxIndexMap<LocalDefId, Vec<DefId>>,
-    pub all_macro_rules: FxHashMap<Symbol, Res<ast::NodeId>>,
+    pub all_macro_rules: FxHashSet<Symbol>,
     pub stripped_cfg_items: Steal<Vec<StrippedCfgItem>>,
 }
 
@@ -991,12 +992,6 @@ impl<'tcx> ParamEnv<'tcx> {
         ParamEnv { caller_bounds }
     }
 
-    /// Returns this same environment but with no caller bounds.
-    #[inline]
-    pub fn without_caller_bounds(self) -> Self {
-        Self::new(ListWithCachedTypeInfo::empty())
-    }
-
     /// Creates a pair of param-env and value for use in queries.
     pub fn and<T: TypeVisitable<TyCtxt<'tcx>>>(self, value: T) -> ParamEnvAnd<'tcx, T> {
         ParamEnvAnd { param_env: self, value }
@@ -1184,23 +1179,17 @@ impl VariantDef {
     ///
     /// If someone speeds up attribute loading to not be a performance concern, they can
     /// remove this hack and use the constructor `DefId` everywhere.
+    #[instrument(level = "debug")]
     pub fn new(
         name: Symbol,
         variant_did: Option<DefId>,
         ctor: Option<(CtorKind, DefId)>,
         discr: VariantDiscr,
         fields: IndexVec<FieldIdx, FieldDef>,
-        adt_kind: AdtKind,
         parent_did: DefId,
         recover_tainted: Option<ErrorGuaranteed>,
         is_field_list_non_exhaustive: bool,
     ) -> Self {
-        debug!(
-            "VariantDef::new(name = {:?}, variant_did = {:?}, ctor = {:?}, discr = {:?},
-             fields = {:?}, adt_kind = {:?}, parent_did = {:?})",
-            name, variant_did, ctor, discr, fields, adt_kind, parent_did,
-        );
-
         let mut flags = VariantFlags::NO_VARIANT_FLAGS;
         if is_field_list_non_exhaustive {
             flags |= VariantFlags::IS_FIELD_LIST_NON_EXHAUSTIVE;
@@ -1470,7 +1459,7 @@ pub enum ImplTraitInTraitData {
 
 impl<'tcx> TyCtxt<'tcx> {
     pub fn typeck_body(self, body: hir::BodyId) -> &'tcx TypeckResults<'tcx> {
-        self.typeck(self.hir().body_owner_def_id(body))
+        self.typeck(self.hir_body_owner_def_id(body))
     }
 
     pub fn provided_trait_methods(self, id: DefId) -> impl 'tcx + Iterator<Item = &'tcx AssocItem> {
@@ -1487,8 +1476,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
         // Generate a deterministically-derived seed from the item's path hash
         // to allow for cross-crate compilation to actually work
-        let mut field_shuffle_seed =
-            self.def_path_hash(did.to_def_id()).0.to_smaller_hash().as_u64();
+        let mut field_shuffle_seed = self.def_path_hash(did.to_def_id()).0.to_smaller_hash();
 
         // If the user defined a custom seed for layout randomization, xor the item's
         // path hash with the user defined seed, this will allowing determinism while
@@ -1497,9 +1485,10 @@ impl<'tcx> TyCtxt<'tcx> {
             field_shuffle_seed ^= user_seed;
         }
 
-        for attr in self.get_attrs(did, sym::repr) {
-            for r in attr::parse_repr_attr(self.sess, attr) {
-                flags.insert(match r {
+        if let Some(reprs) = attr::find_attr!(self.get_all_attrs(did), AttributeKind::Repr(r) => r)
+        {
+            for (r, _) in reprs {
+                flags.insert(match *r {
                     attr::ReprRust => ReprFlags::empty(),
                     attr::ReprC => ReprFlags::IS_C,
                     attr::ReprPacked(pack) => {
@@ -1535,6 +1524,10 @@ impl<'tcx> TyCtxt<'tcx> {
                     }
                     attr::ReprAlign(align) => {
                         max_align = max_align.max(Some(align));
+                        ReprFlags::empty()
+                    }
+                    attr::ReprEmpty => {
+                        /* skip these, they're just for diagnostics */
                         ReprFlags::empty()
                     }
                 });
@@ -1759,13 +1752,21 @@ impl<'tcx> TyCtxt<'tcx> {
         did: impl Into<DefId>,
         attr: Symbol,
     ) -> impl Iterator<Item = &'tcx hir::Attribute> {
+        self.get_all_attrs(did).filter(move |a: &&hir::Attribute| a.has_name(attr))
+    }
+
+    /// Gets all attributes.
+    ///
+    /// To see if an item has a specific attribute, you should use [`rustc_attr_parsing::find_attr!`] so you can use matching.
+    pub fn get_all_attrs(
+        self,
+        did: impl Into<DefId>,
+    ) -> impl Iterator<Item = &'tcx hir::Attribute> {
         let did: DefId = did.into();
-        let filter_fn = move |a: &&hir::Attribute| a.has_name(attr);
         if let Some(did) = did.as_local() {
-            self.hir().attrs(self.local_def_id_to_hir_id(did)).iter().filter(filter_fn)
+            self.hir().attrs(self.local_def_id_to_hir_id(did)).iter()
         } else {
-            debug_assert!(rustc_feature::encode_cross_crate(attr));
-            self.attrs_for_def(did).iter().filter(filter_fn)
+            self.attrs_for_def(did).iter()
         }
     }
 
@@ -1800,14 +1801,11 @@ impl<'tcx> TyCtxt<'tcx> {
         }
     }
 
-    pub fn get_attrs_by_path<'attr>(
+    pub fn get_attrs_by_path(
         self,
         did: DefId,
-        attr: &'attr [Symbol],
-    ) -> impl Iterator<Item = &'tcx hir::Attribute> + 'attr
-    where
-        'tcx: 'attr,
-    {
+        attr: &[Symbol],
+    ) -> impl Iterator<Item = &'tcx hir::Attribute> {
         let filter_fn = move |a: &&hir::Attribute| a.path_matches(attr);
         if let Some(did) = did.as_local() {
             self.hir().attrs(self.local_def_id_to_hir_id(did)).iter().filter(filter_fn)
@@ -2168,7 +2166,6 @@ pub fn provide(providers: &mut Providers) {
     util::provide(providers);
     print::provide(providers);
     super::util::bug::provide(providers);
-    super::middle::provide(providers);
     *providers = Providers {
         trait_impls_of: trait_def::trait_impls_of_provider,
         incoherent_impls: trait_def::incoherent_impls_provider,

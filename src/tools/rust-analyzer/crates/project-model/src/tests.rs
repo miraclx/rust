@@ -1,5 +1,3 @@
-use std::ops::Deref;
-
 use base_db::{CrateGraph, ProcMacroPaths};
 use cargo_metadata::Metadata;
 use cfg::{CfgAtom, CfgDiff};
@@ -12,9 +10,9 @@ use span::FileId;
 use triomphe::Arc;
 
 use crate::{
-    sysroot::SysrootWorkspace, workspace::ProjectWorkspaceKind, CargoWorkspace, CfgOverrides,
-    ManifestPath, ProjectJson, ProjectJsonData, ProjectWorkspace, Sysroot,
-    SysrootSourceWorkspaceConfig, WorkspaceBuildScripts,
+    sysroot::RustLibSrcWorkspace, workspace::ProjectWorkspaceKind, CargoWorkspace, CfgOverrides,
+    ManifestPath, ProjectJson, ProjectJsonData, ProjectWorkspace, RustSourceWorkspaceConfig,
+    Sysroot, WorkspaceBuildScripts,
 };
 
 fn load_cargo(file: &str) -> (CrateGraph, ProcMacroPaths) {
@@ -42,7 +40,6 @@ fn load_workspace_from_metadata(file: &str) -> ProjectWorkspace {
             build_scripts: WorkspaceBuildScripts::default(),
             rustc: Err(None),
             error: None,
-            set_test: true,
         },
         cfg_overrides: Default::default(),
         sysroot: Sysroot::empty(),
@@ -50,6 +47,7 @@ fn load_workspace_from_metadata(file: &str) -> ProjectWorkspace {
         toolchain: None,
         target_layout: Err("target_data_layout not loaded".into()),
         extra_includes: Vec::new(),
+        set_test: true,
     }
 }
 
@@ -65,6 +63,7 @@ fn load_rust_project(file: &str) -> (CrateGraph, ProcMacroPaths) {
         target_layout: Err(Arc::from("test has no data layout")),
         cfg_overrides: Default::default(),
         extra_includes: Vec::new(),
+        set_test: true,
     };
     to_crate_graph(project_workspace, &mut Default::default())
 }
@@ -125,7 +124,10 @@ fn get_fake_sysroot() -> Sysroot {
     let sysroot_dir = AbsPathBuf::assert(sysroot_path);
     let sysroot_src_dir = sysroot_dir.clone();
     let mut sysroot = Sysroot::new(Some(sysroot_dir), Some(sysroot_src_dir));
-    sysroot.load_workspace(&SysrootSourceWorkspaceConfig::default_cargo());
+    let loaded_sysroot = sysroot.load_workspace(&RustSourceWorkspaceConfig::default_cargo());
+    if let Some(loaded_sysroot) = loaded_sysroot {
+        sysroot.set_workspace(loaded_sysroot);
+    }
     sysroot
 }
 
@@ -222,18 +224,6 @@ fn rust_project_cfg_groups() {
 }
 
 #[test]
-fn rust_project_is_proc_macro_has_proc_macro_dep() {
-    let (crate_graph, _proc_macros) = load_rust_project("is-proc-macro-project.json");
-    // Since the project only defines one crate (outside the sysroot crates),
-    // it should be the one with the biggest Id.
-    let crate_id = crate_graph.iter().max().unwrap();
-    let crate_data = &crate_graph[crate_id];
-    // Assert that the project crate with `is_proc_macro` has a dependency
-    // on the proc_macro sysroot crate.
-    crate_data.dependencies.iter().find(|&dep| *dep.name.deref() == sym::proc_macro).unwrap();
-}
-
-#[test]
 fn crate_graph_dedup_identical() {
     let (mut crate_graph, proc_macros) = load_cargo("regex-metadata.json");
 
@@ -271,15 +261,17 @@ fn smoke_test_real_sysroot_cargo() {
         AbsPath::assert(Utf8Path::new(env!("CARGO_MANIFEST_DIR"))),
         &Default::default(),
     );
-    sysroot.load_workspace(&SysrootSourceWorkspaceConfig::default_cargo());
-    assert!(matches!(sysroot.workspace(), SysrootWorkspace::Workspace(_)));
+    let loaded_sysroot = sysroot.load_workspace(&RustSourceWorkspaceConfig::default_cargo());
+    if let Some(loaded_sysroot) = loaded_sysroot {
+        sysroot.set_workspace(loaded_sysroot);
+    }
+    assert!(matches!(sysroot.workspace(), RustLibSrcWorkspace::Workspace(_)));
     let project_workspace = ProjectWorkspace {
         kind: ProjectWorkspaceKind::Cargo {
             cargo: cargo_workspace,
             build_scripts: WorkspaceBuildScripts::default(),
             rustc: Err(None),
             error: None,
-            set_test: true,
         },
         sysroot,
         rustc_cfg: Vec::new(),
@@ -287,6 +279,7 @@ fn smoke_test_real_sysroot_cargo() {
         toolchain: None,
         target_layout: Err("target_data_layout not loaded".into()),
         extra_includes: Vec::new(),
+        set_test: true,
     };
     project_workspace.to_crate_graph(
         &mut {
