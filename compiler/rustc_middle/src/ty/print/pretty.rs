@@ -133,6 +133,20 @@ pub macro with_no_queries($e:expr) {{
     ))
 }}
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WrapBinderMode {
+    ForAll,
+    Unsafe,
+}
+impl WrapBinderMode {
+    pub fn start_str(self) -> &'static str {
+        match self {
+            WrapBinderMode::ForAll => "for<",
+            WrapBinderMode::Unsafe => "unsafe<",
+        }
+    }
+}
+
 /// The "region highlights" are used to control region printing during
 /// specific error messages. When a "region highlight" is enabled, it
 /// gives an alternate way to print specific regions. For now, we
@@ -219,7 +233,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
         self.print_def_path(def_id, args)
     }
 
-    fn in_binder<T>(&mut self, value: &ty::Binder<'tcx, T>) -> Result<(), PrintError>
+    fn print_in_binder<T>(&mut self, value: &ty::Binder<'tcx, T>) -> Result<(), PrintError>
     where
         T: Print<'tcx, Self> + TypeFoldable<TyCtxt<'tcx>>,
     {
@@ -229,10 +243,11 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
     fn wrap_binder<T, F: FnOnce(&T, &mut Self) -> Result<(), fmt::Error>>(
         &mut self,
         value: &ty::Binder<'tcx, T>,
+        _mode: WrapBinderMode,
         f: F,
     ) -> Result<(), PrintError>
     where
-        T: Print<'tcx, Self> + TypeFoldable<TyCtxt<'tcx>>,
+        T: TypeFoldable<TyCtxt<'tcx>>,
     {
         f(value.as_ref().skip_binder(), self)
     }
@@ -703,8 +718,9 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             }
             ty::FnPtr(ref sig_tys, hdr) => p!(print(sig_tys.with(hdr))),
             ty::UnsafeBinder(ref bound_ty) => {
-                // FIXME(unsafe_binders): Make this print `unsafe<>` rather than `for<>`.
-                self.wrap_binder(bound_ty, |ty, cx| cx.pretty_print_type(*ty))?;
+                self.wrap_binder(bound_ty, WrapBinderMode::Unsafe, |ty, cx| {
+                    cx.pretty_print_type(*ty)
+                })?;
             }
             ty::Infer(infer_ty) => {
                 if self.should_print_verbose() {
@@ -1056,7 +1072,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
         // Insert parenthesis around (Fn(A, B) -> C) if the opaque ty has more than one other trait
         let paren_needed = fn_traits.len() > 1 || traits.len() > 0 || !has_sized_bound;
 
-        for ((bound_args, is_async), entry) in fn_traits {
+        for ((bound_args_and_self_ty, is_async), entry) in fn_traits {
             write!(self, "{}", if first { "" } else { " + " })?;
             write!(self, "{}", if paren_needed { "(" } else { "" })?;
 
@@ -1067,35 +1083,43 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             };
 
             if let Some(return_ty) = entry.return_ty {
-                self.wrap_binder(&bound_args, |args, cx| {
-                    define_scoped_cx!(cx);
-                    p!(write("{}", tcx.item_name(trait_def_id)));
-                    p!("(");
+                self.wrap_binder(
+                    &bound_args_and_self_ty,
+                    WrapBinderMode::ForAll,
+                    |(args, _), cx| {
+                        define_scoped_cx!(cx);
+                        p!(write("{}", tcx.item_name(trait_def_id)));
+                        p!("(");
 
-                    for (idx, ty) in args.iter().enumerate() {
-                        if idx > 0 {
-                            p!(", ");
+                        for (idx, ty) in args.iter().enumerate() {
+                            if idx > 0 {
+                                p!(", ");
+                            }
+                            p!(print(ty));
                         }
-                        p!(print(ty));
-                    }
 
-                    p!(")");
-                    if let Some(ty) = return_ty.skip_binder().as_type() {
-                        if !ty.is_unit() {
-                            p!(" -> ", print(return_ty));
+                        p!(")");
+                        if let Some(ty) = return_ty.skip_binder().as_type() {
+                            if !ty.is_unit() {
+                                p!(" -> ", print(return_ty));
+                            }
                         }
-                    }
-                    p!(write("{}", if paren_needed { ")" } else { "" }));
+                        p!(write("{}", if paren_needed { ")" } else { "" }));
 
-                    first = false;
-                    Ok(())
-                })?;
+                        first = false;
+                        Ok(())
+                    },
+                )?;
             } else {
                 // Otherwise, render this like a regular trait.
                 traits.insert(
-                    bound_args.map_bound(|args| ty::TraitPredicate {
+                    bound_args_and_self_ty.map_bound(|(args, self_ty)| ty::TraitPredicate {
                         polarity: ty::PredicatePolarity::Positive,
-                        trait_ref: ty::TraitRef::new(tcx, trait_def_id, [Ty::new_tup(tcx, args)]),
+                        trait_ref: ty::TraitRef::new(
+                            tcx,
+                            trait_def_id,
+                            [self_ty, Ty::new_tup(tcx, args)],
+                        ),
                     }),
                     FxIndexMap::default(),
                 );
@@ -1106,7 +1130,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
         for (trait_pred, assoc_items) in traits {
             write!(self, "{}", if first { "" } else { " + " })?;
 
-            self.wrap_binder(&trait_pred, |trait_pred, cx| {
+            self.wrap_binder(&trait_pred, WrapBinderMode::ForAll, |trait_pred, cx| {
                 define_scoped_cx!(cx);
 
                 if trait_pred.polarity == ty::PredicatePolarity::Negative {
@@ -1229,7 +1253,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             FxIndexMap<DefId, ty::Binder<'tcx, Term<'tcx>>>,
         >,
         fn_traits: &mut FxIndexMap<
-            (ty::Binder<'tcx, &'tcx ty::List<Ty<'tcx>>>, bool),
+            (ty::Binder<'tcx, (&'tcx ty::List<Ty<'tcx>>, Ty<'tcx>)>, bool),
             OpaqueFnEntry<'tcx>,
         >,
     ) {
@@ -1249,7 +1273,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             && let ty::Tuple(types) = *trait_pred.skip_binder().trait_ref.args.type_at(1).kind()
         {
             let entry = fn_traits
-                .entry((trait_pred.rebind(types), is_async))
+                .entry((trait_pred.rebind((types, trait_pred.skip_binder().self_ty())), is_async))
                 .or_insert_with(|| OpaqueFnEntry { kind, return_ty: None });
             if kind.extends(entry.kind) {
                 entry.kind = kind;
@@ -1298,7 +1322,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
         let mut first = true;
 
         if let Some(bound_principal) = predicates.principal() {
-            self.wrap_binder(&bound_principal, |principal, cx| {
+            self.wrap_binder(&bound_principal, WrapBinderMode::ForAll, |principal, cx| {
                 define_scoped_cx!(cx);
                 p!(print_def_path(principal.def_id, &[]));
 
@@ -1512,10 +1536,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             ty::ExprKind::Binop(op) => {
                 let (_, _, c1, c2) = expr.binop_args();
 
-                let precedence = |binop: crate::mir::BinOp| {
-                    use rustc_ast::util::parser::AssocOp;
-                    AssocOp::from_ast_binop(binop.to_hir_binop()).precedence()
-                };
+                let precedence = |binop: crate::mir::BinOp| binop.to_hir_binop().precedence();
                 let op_precedence = precedence(op);
                 let formatted_op = op.to_hir_binop().as_str();
                 let (lhs_parenthesized, rhs_parenthesized) = match (c1.kind(), c2.kind()) {
@@ -1926,7 +1947,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
         let kind = closure.kind_ty().to_opt_closure_kind().unwrap_or(ty::ClosureKind::Fn);
 
         write!(self, "impl ")?;
-        self.wrap_binder(&sig, |sig, cx| {
+        self.wrap_binder(&sig, WrapBinderMode::ForAll, |sig, cx| {
             define_scoped_cx!(cx);
 
             p!(write("{kind}("));
@@ -2366,22 +2387,23 @@ impl<'tcx> PrettyPrinter<'tcx> for FmtPrinter<'_, 'tcx> {
         Ok(())
     }
 
-    fn in_binder<T>(&mut self, value: &ty::Binder<'tcx, T>) -> Result<(), PrintError>
+    fn print_in_binder<T>(&mut self, value: &ty::Binder<'tcx, T>) -> Result<(), PrintError>
     where
         T: Print<'tcx, Self> + TypeFoldable<TyCtxt<'tcx>>,
     {
-        self.pretty_in_binder(value)
+        self.pretty_print_in_binder(value)
     }
 
     fn wrap_binder<T, C: FnOnce(&T, &mut Self) -> Result<(), PrintError>>(
         &mut self,
         value: &ty::Binder<'tcx, T>,
+        mode: WrapBinderMode,
         f: C,
     ) -> Result<(), PrintError>
     where
-        T: Print<'tcx, Self> + TypeFoldable<TyCtxt<'tcx>>,
+        T: TypeFoldable<TyCtxt<'tcx>>,
     {
-        self.pretty_wrap_binder(value, f)
+        self.pretty_wrap_binder(value, mode, f)
     }
 
     fn typed_value(
@@ -2631,9 +2653,10 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
     pub fn name_all_regions<T>(
         &mut self,
         value: &ty::Binder<'tcx, T>,
+        mode: WrapBinderMode,
     ) -> Result<(T, UnordMap<ty::BoundRegion, ty::Region<'tcx>>), fmt::Error>
     where
-        T: Print<'tcx, Self> + TypeFoldable<TyCtxt<'tcx>>,
+        T: TypeFoldable<TyCtxt<'tcx>>,
     {
         fn name_by_region_index(
             index: usize,
@@ -2704,8 +2727,12 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
         // anyways.
         let (new_value, map) = if self.should_print_verbose() {
             for var in value.bound_vars().iter() {
-                start_or_continue(self, "for<", ", ");
+                start_or_continue(self, mode.start_str(), ", ");
                 write!(self, "{var:?}")?;
+            }
+            // Unconditionally render `unsafe<>`.
+            if value.bound_vars().is_empty() && mode == WrapBinderMode::Unsafe {
+                start_or_continue(self, mode.start_str(), "");
             }
             start_or_continue(self, "", "> ");
             (value.clone().skip_binder(), UnordMap::default())
@@ -2771,8 +2798,9 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
                     }
                 };
 
-                if !trim_path {
-                    start_or_continue(self, "for<", ", ");
+                // Unconditionally render `unsafe<>`.
+                if !trim_path || mode == WrapBinderMode::Unsafe {
+                    start_or_continue(self, mode.start_str(), ", ");
                     do_continue(self, name);
                 }
                 ty::Region::new_bound(tcx, ty::INNERMOST, ty::BoundRegion { var: br.var, kind })
@@ -2785,9 +2813,12 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
             };
             let new_value = value.clone().skip_binder().fold_with(&mut folder);
             let region_map = folder.region_map;
-            if !trim_path {
-                start_or_continue(self, "", "> ");
+
+            if mode == WrapBinderMode::Unsafe && region_map.is_empty() {
+                start_or_continue(self, mode.start_str(), "");
             }
+            start_or_continue(self, "", "> ");
+
             (new_value, region_map)
         };
 
@@ -2796,12 +2827,15 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
         Ok((new_value, map))
     }
 
-    pub fn pretty_in_binder<T>(&mut self, value: &ty::Binder<'tcx, T>) -> Result<(), fmt::Error>
+    pub fn pretty_print_in_binder<T>(
+        &mut self,
+        value: &ty::Binder<'tcx, T>,
+    ) -> Result<(), fmt::Error>
     where
         T: Print<'tcx, Self> + TypeFoldable<TyCtxt<'tcx>>,
     {
         let old_region_index = self.region_index;
-        let (new_value, _) = self.name_all_regions(value)?;
+        let (new_value, _) = self.name_all_regions(value, WrapBinderMode::ForAll)?;
         new_value.print(self)?;
         self.region_index = old_region_index;
         self.binder_depth -= 1;
@@ -2811,13 +2845,14 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
     pub fn pretty_wrap_binder<T, C: FnOnce(&T, &mut Self) -> Result<(), fmt::Error>>(
         &mut self,
         value: &ty::Binder<'tcx, T>,
+        mode: WrapBinderMode,
         f: C,
     ) -> Result<(), fmt::Error>
     where
-        T: Print<'tcx, Self> + TypeFoldable<TyCtxt<'tcx>>,
+        T: TypeFoldable<TyCtxt<'tcx>>,
     {
         let old_region_index = self.region_index;
-        let (new_value, _) = self.name_all_regions(value)?;
+        let (new_value, _) = self.name_all_regions(value, mode)?;
         f(&new_value, self)?;
         self.region_index = old_region_index;
         self.binder_depth -= 1;
@@ -2876,7 +2911,7 @@ where
     T: Print<'tcx, P> + TypeFoldable<TyCtxt<'tcx>>,
 {
     fn print(&self, cx: &mut P) -> Result<(), PrintError> {
-        cx.in_binder(self)
+        cx.print_in_binder(self)
     }
 }
 
@@ -2894,12 +2929,15 @@ where
 /// Wrapper type for `ty::TraitRef` which opts-in to pretty printing only
 /// the trait path. That is, it will print `Trait<U>` instead of
 /// `<T as Trait<U>>`.
-#[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift)]
+#[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift, Hash)]
 pub struct TraitRefPrintOnlyTraitPath<'tcx>(ty::TraitRef<'tcx>);
 
 impl<'tcx> rustc_errors::IntoDiagArg for TraitRefPrintOnlyTraitPath<'tcx> {
-    fn into_diag_arg(self) -> rustc_errors::DiagArgValue {
-        self.to_string().into_diag_arg()
+    fn into_diag_arg(self, path: &mut Option<std::path::PathBuf>) -> rustc_errors::DiagArgValue {
+        ty::tls::with(|tcx| {
+            let trait_ref = tcx.short_string(self, path);
+            rustc_errors::DiagArgValue::Str(std::borrow::Cow::Owned(trait_ref))
+        })
     }
 }
 
@@ -2911,12 +2949,15 @@ impl<'tcx> fmt::Debug for TraitRefPrintOnlyTraitPath<'tcx> {
 
 /// Wrapper type for `ty::TraitRef` which opts-in to pretty printing only
 /// the trait path, and additionally tries to "sugar" `Fn(...)` trait bounds.
-#[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift)]
+#[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift, Hash)]
 pub struct TraitRefPrintSugared<'tcx>(ty::TraitRef<'tcx>);
 
 impl<'tcx> rustc_errors::IntoDiagArg for TraitRefPrintSugared<'tcx> {
-    fn into_diag_arg(self) -> rustc_errors::DiagArgValue {
-        self.to_string().into_diag_arg()
+    fn into_diag_arg(self, path: &mut Option<std::path::PathBuf>) -> rustc_errors::DiagArgValue {
+        ty::tls::with(|tcx| {
+            let trait_ref = tcx.short_string(self, path);
+            rustc_errors::DiagArgValue::Str(std::borrow::Cow::Owned(trait_ref))
+        })
     }
 }
 
@@ -3299,13 +3340,12 @@ define_print_and_forward_display! {
 
 fn for_each_def(tcx: TyCtxt<'_>, mut collect_fn: impl for<'b> FnMut(&'b Ident, Namespace, DefId)) {
     // Iterate all local crate items no matter where they are defined.
-    let hir = tcx.hir();
-    for id in hir.items() {
+    for id in tcx.hir_free_items() {
         if matches!(tcx.def_kind(id.owner_id), DefKind::Use) {
             continue;
         }
 
-        let item = hir.item(id);
+        let item = tcx.hir_item(id);
         if item.ident.name == kw::Empty {
             continue;
         }

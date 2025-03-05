@@ -278,6 +278,10 @@ impl ModuleConfig {
             || self.emit_obj == EmitObj::Bitcode
             || self.emit_obj == EmitObj::ObjectCode(BitcodeSection::Full)
     }
+
+    pub fn embed_bitcode(&self) -> bool {
+        self.emit_obj == EmitObj::ObjectCode(BitcodeSection::Full)
+    }
 }
 
 /// Configuration passed to the function returned by the `target_machine_factory`.
@@ -405,7 +409,8 @@ fn generate_lto_work<B: ExtraBackendMethods>(
             B::run_fat_lto(cgcx, needs_fat_lto, import_only_modules).unwrap_or_else(|e| e.raise());
         if cgcx.lto == Lto::Fat && !autodiff.is_empty() {
             let config = cgcx.config(ModuleKind::Regular);
-            module = unsafe { module.autodiff(cgcx, autodiff, config).unwrap() };
+            module =
+                unsafe { module.autodiff(cgcx, autodiff, config).unwrap_or_else(|e| e.raise()) };
         }
         // We are adding a single work item, so the cost doesn't matter.
         vec![(WorkItem::LTO(module), 0)]
@@ -572,10 +577,10 @@ fn produce_final_output_artifacts(
     };
 
     let copy_if_one_unit = |output_type: OutputType, keep_numbered: bool| {
-        if compiled_modules.modules.len() == 1 {
+        if let [module] = &compiled_modules.modules[..] {
             // 1) Only one codegen unit. In this case it's no difficulty
             //    to copy `foo.0.x` to `foo.x`.
-            let module_name = Some(&compiled_modules.modules[0].name[..]);
+            let module_name = Some(&module.name[..]);
             let path = crate_output.temp_path(output_type, module_name);
             let output = crate_output.path(output_type);
             if !output_type.is_text_output() && output.is_tty() {
@@ -707,8 +712,8 @@ fn produce_final_output_artifacts(
     }
 
     if sess.opts.json_artifact_notifications {
-        if compiled_modules.modules.len() == 1 {
-            compiled_modules.modules[0].for_each_output(|_path, ty| {
+        if let [module] = &compiled_modules.modules[..] {
+            module.for_each_output(|_path, ty| {
                 if sess.opts.output_types.contains_key(&ty) {
                     let descr = ty.shorthand();
                     // for single cgu file is renamed to drop cgu specific suffix
@@ -864,7 +869,7 @@ pub(crate) fn compute_per_cgu_lto_type(
     // require LTO so the request for LTO is always unconditionally
     // passed down to the backend, but we don't actually want to do
     // anything about it yet until we've got a final product.
-    let is_rlib = sess_crate_types.len() == 1 && sess_crate_types[0] == CrateType::Rlib;
+    let is_rlib = matches!(sess_crate_types, [CrateType::Rlib]);
 
     match sess_lto {
         Lto::ThinLocal if !linker_does_lto && !is_allocator => ComputedLtoType::Thin,
@@ -876,14 +881,14 @@ pub(crate) fn compute_per_cgu_lto_type(
 
 fn execute_optimize_work_item<B: ExtraBackendMethods>(
     cgcx: &CodegenContext<B>,
-    module: ModuleCodegen<B::Module>,
+    mut module: ModuleCodegen<B::Module>,
     module_config: &ModuleConfig,
 ) -> Result<WorkItemResult<B>, FatalError> {
     let dcx = cgcx.create_dcx();
     let dcx = dcx.handle();
 
     unsafe {
-        B::optimize(cgcx, dcx, &module, module_config)?;
+        B::optimize(cgcx, dcx, &mut module, module_config)?;
     }
 
     // After we've done the initial round of optimizations we need to
@@ -1537,8 +1542,9 @@ fn start_executing_work<B: ExtraBackendMethods>(
             // Spin up what work we can, only doing this while we've got available
             // parallelism slots and work left to spawn.
             if codegen_state != Aborted {
-                while !work_items.is_empty() && running_with_own_token < tokens.len() {
-                    let (item, _) = work_items.pop().unwrap();
+                while running_with_own_token < tokens.len()
+                    && let Some((item, _)) = work_items.pop()
+                {
                     spawn_work(
                         &cgcx,
                         &mut llvm_start_time,

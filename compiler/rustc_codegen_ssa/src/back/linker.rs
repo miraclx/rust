@@ -153,6 +153,7 @@ pub(crate) fn get_linker<'a>(
             hinted_static: None,
             is_ld: cc == Cc::No,
             is_gnu: flavor.is_gnu(),
+            uses_lld: flavor.uses_lld(),
         }) as Box<dyn Linker>,
         LinkerFlavor::Msvc(..) => Box::new(MsvcLinker { cmd, sess }) as Box<dyn Linker>,
         LinkerFlavor::EmCc => Box::new(EmLinker { cmd, sess }) as Box<dyn Linker>,
@@ -361,6 +362,7 @@ struct GccLinker<'a> {
     // Link as ld
     is_ld: bool,
     is_gnu: bool,
+    uses_lld: bool,
 }
 
 impl<'a> GccLinker<'a> {
@@ -552,6 +554,7 @@ impl<'a> Linker for GccLinker<'a> {
                 self.link_args(&["--entry", "_initialize"]);
             }
         }
+
         // VxWorks compiler driver introduced `--static-crt` flag specifically for rustc,
         // it switches linking for libc and similar system libraries to static without using
         // any `#[link]` attributes in the `libc` crate, see #72782 for details.
@@ -566,6 +569,15 @@ impl<'a> Linker for GccLinker<'a> {
             )
         {
             self.cc_arg("--static-crt");
+        }
+
+        // avr-none doesn't have default ISA, users must specify which specific
+        // CPU (well, microcontroller) they are targetting using `-Ctarget-cpu`.
+        //
+        // Currently this makes sense only when using avr-gcc as a linker, since
+        // it brings a couple of hand-written important intrinsics from libgcc.
+        if self.sess.target.arch == "avr" && !self.uses_lld {
+            self.verbatim_arg(format!("-mmcu={}", self.target_cpu));
         }
     }
 
@@ -1776,6 +1788,7 @@ fn exported_symbols_for_non_proc_macro(tcx: TyCtxt<'_>, crate_type: CrateType) -
             symbols.push(symbol_export::exporting_symbol_name_for_instance_in_crate(
                 tcx, symbol, cnum,
             ));
+            symbol_export::extend_exported_symbols(&mut symbols, tcx, symbol, cnum);
         }
     });
 
@@ -1926,14 +1939,14 @@ impl<'a> Linker for LlbcLinker<'a> {
     }
 
     fn optimize(&mut self) {
-        match self.sess.opts.optimize {
+        self.link_arg(match self.sess.opts.optimize {
             OptLevel::No => "-O0",
             OptLevel::Less => "-O1",
             OptLevel::More => "-O2",
             OptLevel::Aggressive => "-O3",
             OptLevel::Size => "-Os",
             OptLevel::SizeMin => "-Oz",
-        };
+        });
     }
 
     fn full_relro(&mut self) {}

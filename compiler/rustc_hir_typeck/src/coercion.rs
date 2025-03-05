@@ -51,15 +51,13 @@ use rustc_infer::traits::{
     PredicateObligations,
 };
 use rustc_middle::span_bug;
-use rustc_middle::traits::BuiltinImplSource;
 use rustc_middle::ty::adjustment::{
     Adjust, Adjustment, AllowTwoPhase, AutoBorrow, AutoBorrowMutability, PointerCoercion,
 };
 use rustc_middle::ty::error::TypeError;
 use rustc_middle::ty::visit::TypeVisitableExt;
 use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt};
-use rustc_session::parse::feature_err;
-use rustc_span::{BytePos, DUMMY_SP, DesugaringKind, Span, sym};
+use rustc_span::{BytePos, DUMMY_SP, DesugaringKind, Span};
 use rustc_trait_selection::infer::InferCtxtExt as _;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
 use rustc_trait_selection::traits::{
@@ -610,8 +608,6 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
             ty::TraitRef::new(self.tcx, coerce_unsized_did, [coerce_source, coerce_target])
         )];
 
-        let mut has_unsized_tuple_coercion = false;
-
         // Keep resolving `CoerceUnsized` and `Unsize` predicates to avoid
         // emitting a coercion in cases like `Foo<$1>` -> `Foo<$2>`, where
         // inference might unify those two inner type variables later.
@@ -690,29 +686,8 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
                     // be silent, as it causes a type mismatch later.
                 }
 
-                Ok(Some(impl_source)) => {
-                    // Some builtin coercions are still unstable so we detect
-                    // these here and emit a feature error if coercion doesn't fail
-                    // due to another reason.
-                    match impl_source {
-                        traits::ImplSource::Builtin(BuiltinImplSource::TupleUnsizing, _) => {
-                            has_unsized_tuple_coercion = true;
-                        }
-                        _ => {}
-                    }
-                    queue.extend(impl_source.nested_obligations())
-                }
+                Ok(Some(impl_source)) => queue.extend(impl_source.nested_obligations()),
             }
-        }
-
-        if has_unsized_tuple_coercion && !self.tcx.features().unsized_tuple_coercion() {
-            feature_err(
-                &self.tcx.sess,
-                sym::unsized_tuple_coercion,
-                self.cause.span,
-                "unsized tuple coercion is not stable enough for use and is subject to change",
-            )
-            .emit();
         }
 
         Ok(coercion)
@@ -1752,7 +1727,7 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                                 return false;
                             }
                             let Some((_, hir::Node::Expr(expr))) =
-                                fcx.tcx.hir().parent_iter(id).nth(1)
+                                fcx.tcx.hir_parent_iter(id).nth(1)
                             else {
                                 return false;
                             };
@@ -1887,11 +1862,11 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
         let parent_id = fcx.tcx.parent_hir_id(block_or_return_id);
         let parent = fcx.tcx.hir_node(parent_id);
         if let Some(expr) = expression
-            && let hir::Node::Expr(hir::Expr {
+            && let hir::Node::Expr(&hir::Expr {
                 kind: hir::ExprKind::Closure(&hir::Closure { body, .. }),
                 ..
             }) = parent
-            && !matches!(fcx.tcx.hir().body(body).value.kind, hir::ExprKind::Block(..))
+            && !matches!(fcx.tcx.hir_body(body).value.kind, hir::ExprKind::Block(..))
         {
             fcx.suggest_missing_semicolon(&mut err, expr, expected, true);
         }
@@ -1909,7 +1884,7 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                 found,
                 block_or_return_id,
             );
-            if let Some(cond_expr) = fcx.tcx.hir().get_if_cause(expr.hir_id)
+            if let Some(cond_expr) = fcx.tcx.hir_get_if_cause(expr.hir_id)
                 && expected.is_unit()
                 && !pointing_at_return_type
                 // If the block is from an external macro or try (`?`) desugaring, then
@@ -1943,7 +1918,7 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
         if due_to_block
             && let Some(expr) = expression
             && let Some(parent_fn_decl) =
-                fcx.tcx.hir().fn_decl_by_hir_id(fcx.tcx.local_def_id_to_hir_id(fcx.body_id))
+                fcx.tcx.hir_fn_decl_by_hir_id(fcx.tcx.local_def_id_to_hir_id(fcx.body_id))
         {
             fcx.suggest_missing_break_or_return_expr(
                 &mut err,

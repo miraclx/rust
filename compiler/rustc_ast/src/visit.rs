@@ -597,7 +597,7 @@ pub fn walk_use_tree<'a, V: Visitor<'a>>(
             visit_opt!(visitor, visit_ident, rename);
         }
         UseTreeKind::Glob => {}
-        UseTreeKind::Nested { ref items, span: _ } => {
+        UseTreeKind::Nested { items, span: _ } => {
             for &(ref nested_tree, nested_id) in items {
                 try_visit!(visitor.visit_use_tree(nested_tree, nested_id, true));
             }
@@ -833,7 +833,8 @@ pub fn walk_where_predicate<'a, V: Visitor<'a>>(
     visitor: &mut V,
     predicate: &'a WherePredicate,
 ) -> V::Result {
-    let WherePredicate { kind, id: _, span: _ } = predicate;
+    let WherePredicate { attrs, kind, id: _, span: _, is_placeholder: _ } = predicate;
+    walk_list!(visitor, visit_attribute, attrs);
     visitor.visit_where_predicate_kind(kind)
 }
 

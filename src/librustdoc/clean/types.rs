@@ -220,12 +220,11 @@ impl ExternalCrate {
             None
         };
         if root.is_local() {
-            tcx.hir()
-                .root_module()
+            tcx.hir_root_module()
                 .item_ids
                 .iter()
                 .filter_map(|&id| {
-                    let item = tcx.hir().item(id);
+                    let item = tcx.hir_item(id);
                     match item.kind {
                         hir::ItemKind::Mod(_) => {
                             as_keyword(Res::Def(DefKind::Mod, id.owner_id.to_def_id()))
@@ -266,7 +265,7 @@ impl ExternalCrate {
                     let attr_value = attr.value_str().expect("syntax should already be validated");
                     let Some(prim) = PrimitiveType::from_symbol(attr_value) else {
                         span_bug!(
-                            attr.span,
+                            attr.span(),
                             "primitive `{attr_value}` is not a member of `PrimitiveType`"
                         );
                     };
@@ -277,12 +276,11 @@ impl ExternalCrate {
         };
 
         if root.is_local() {
-            tcx.hir()
-                .root_module()
+            tcx.hir_root_module()
                 .item_ids
                 .iter()
                 .filter_map(|&id| {
-                    let item = tcx.hir().item(id);
+                    let item = tcx.hir_item(id);
                     match item.kind {
                         hir::ItemKind::Mod(_) => {
                             as_primitive(Res::Def(DefKind::Mod, id.owner_id.to_def_id()))
@@ -504,7 +502,7 @@ impl Item {
         let Some(links) = cx.cache().intra_doc_links.get(&self.item_id) else { return vec![] };
         links
             .iter()
-            .filter_map(|ItemLink { link: s, link_text, page_id: id, ref fragment }| {
+            .filter_map(|ItemLink { link: s, link_text, page_id: id, fragment }| {
                 debug!(?id);
                 if let Ok((mut href, ..)) = href(*id, cx) {
                     debug!(?href);
@@ -1152,7 +1150,7 @@ pub(crate) struct Attributes {
 }
 
 impl Attributes {
-    pub(crate) fn lists(&self, name: Symbol) -> impl Iterator<Item = ast::MetaItemInner> + '_ {
+    pub(crate) fn lists(&self, name: Symbol) -> impl Iterator<Item = ast::MetaItemInner> {
         hir_attr_lists(&self.other_attrs[..], name)
     }
 
@@ -1866,7 +1864,7 @@ impl PrimitiveType {
             .copied()
     }
 
-    pub(crate) fn all_impls(tcx: TyCtxt<'_>) -> impl Iterator<Item = DefId> + '_ {
+    pub(crate) fn all_impls(tcx: TyCtxt<'_>) -> impl Iterator<Item = DefId> {
         Self::simplified_types()
             .values()
             .flatten()
@@ -2122,9 +2120,8 @@ impl Discriminant {
     /// Will be `None` in the case of cross-crate reexports, and may be
     /// simplified
     pub(crate) fn expr(&self, tcx: TyCtxt<'_>) -> Option<String> {
-        self.expr.map(|body| {
-            rendered_const(tcx, tcx.hir().body(body), tcx.hir().body_owner_def_id(body))
-        })
+        self.expr
+            .map(|body| rendered_const(tcx, tcx.hir_body(body), tcx.hir_body_owner_def_id(body)))
     }
     pub(crate) fn value(&self, tcx: TyCtxt<'_>, with_underscores: bool) -> String {
         print_evaluated_const(tcx, self.value, with_underscores, false).unwrap()
@@ -2262,7 +2259,7 @@ impl GenericArgs {
             GenericArgs::Parenthesized { inputs, output } => inputs.is_empty() && output.is_none(),
         }
     }
-    pub(crate) fn constraints<'a>(&'a self) -> Box<dyn Iterator<Item = AssocItemConstraint> + 'a> {
+    pub(crate) fn constraints(&self) -> Box<dyn Iterator<Item = AssocItemConstraint> + '_> {
         match self {
             GenericArgs::AngleBracketed { constraints, .. } => {
                 Box::new(constraints.iter().cloned())
@@ -2420,7 +2417,7 @@ impl ConstantKind {
             ConstantKind::Path { ref path } => path.to_string(),
             ConstantKind::Extern { def_id } => print_inlined_const(tcx, def_id),
             ConstantKind::Local { body, .. } | ConstantKind::Anonymous { body } => {
-                rendered_const(tcx, tcx.hir().body(body), tcx.hir().body_owner_def_id(body))
+                rendered_const(tcx, tcx.hir_body(body), tcx.hir_body_owner_def_id(body))
             }
             ConstantKind::Infer { .. } => "_".to_string(),
         }

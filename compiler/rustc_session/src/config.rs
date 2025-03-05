@@ -42,6 +42,32 @@ mod cfg;
 mod native_libs;
 pub mod sigpipe;
 
+pub const PRINT_KINDS: &[(&str, PrintKind)] = &[
+    // tidy-alphabetical-start
+    ("all-target-specs-json", PrintKind::AllTargetSpecs),
+    ("calling-conventions", PrintKind::CallingConventions),
+    ("cfg", PrintKind::Cfg),
+    ("check-cfg", PrintKind::CheckCfg),
+    ("code-models", PrintKind::CodeModels),
+    ("crate-name", PrintKind::CrateName),
+    ("deployment-target", PrintKind::DeploymentTarget),
+    ("file-names", PrintKind::FileNames),
+    ("host-tuple", PrintKind::HostTuple),
+    ("link-args", PrintKind::LinkArgs),
+    ("native-static-libs", PrintKind::NativeStaticLibs),
+    ("relocation-models", PrintKind::RelocationModels),
+    ("split-debuginfo", PrintKind::SplitDebuginfo),
+    ("stack-protector-strategies", PrintKind::StackProtectorStrategies),
+    ("sysroot", PrintKind::Sysroot),
+    ("target-cpus", PrintKind::TargetCPUs),
+    ("target-features", PrintKind::TargetFeatures),
+    ("target-libdir", PrintKind::TargetLibdir),
+    ("target-list", PrintKind::TargetList),
+    ("target-spec-json", PrintKind::TargetSpec),
+    ("tls-models", PrintKind::TlsModels),
+    // tidy-alphabetical-end
+];
+
 /// The different settings that the `-C strip` flag can have.
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
 pub enum Strip {
@@ -198,33 +224,26 @@ pub enum CoverageLevel {
 /// The different settings that the `-Z autodiff` flag can have.
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
 pub enum AutoDiff {
+    /// Enable the autodiff opt pipeline
+    Enable,
+
     /// Print TypeAnalysis information
     PrintTA,
     /// Print ActivityAnalysis Information
     PrintAA,
     /// Print Performance Warnings from Enzyme
     PrintPerf,
-    /// Combines the three print flags above.
-    Print,
+    /// Print intermediate IR generation steps
+    PrintSteps,
     /// Print the whole module, before running opts.
     PrintModBefore,
-    /// Print the whole module just before we pass it to Enzyme.
-    /// For Debug purpose, prefer the OPT flag below
-    PrintModAfterOpts,
     /// Print the module after Enzyme differentiated everything.
-    PrintModAfterEnzyme,
+    PrintModAfter,
 
-    /// Enzyme's loose type debug helper (can cause incorrect gradients)
+    /// Enzyme's loose type debug helper (can cause incorrect gradients!!)
+    /// Usable in cases where Enzyme errors with `can not deduce type of X`.
     LooseTypes,
-
-    /// More flags
-    NoModOptAfter,
-    /// Tell Enzyme to run LLVM Opts on each function it generated. By default off,
-    /// since we already optimize the whole module after Enzyme is done.
-    EnableFncOpt,
-    NoVecUnroll,
-    RuntimeActivity,
-    /// Runs Enzyme specific Inlining
+    /// Runs Enzyme's aggressive inlining
     Inline,
 }
 
@@ -546,7 +565,10 @@ impl FromStr for SplitDwarfKind {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, HashStable_Generic)]
 #[derive(Encodable, Decodable)]
 pub enum OutputType {
+    /// This is the optimized bitcode, which could be either pre-LTO or non-LTO bitcode,
+    /// depending on the specific request type.
     Bitcode,
+    /// This is the summary or index data part of the ThinLTO bitcode.
     ThinLinkBitcode,
     Assembly,
     LlvmAssembly,
@@ -1512,6 +1534,13 @@ The default is {DEFAULT_EDITION} and the latest stable edition is {LATEST_STABLE
     )
 });
 
+static PRINT_KINDS_STRING: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "[{}]",
+        PRINT_KINDS.iter().map(|(name, _)| format!("{name}")).collect::<Vec<_>>().join("|")
+    )
+});
+
 /// Returns all rustc command line options, including metadata for
 /// each option, such as whether the option is stable.
 pub fn rustc_optgroups() -> Vec<RustcOptGroup> {
@@ -1572,10 +1601,7 @@ pub fn rustc_optgroups() -> Vec<RustcOptGroup> {
             "",
             "print",
             "Compiler information to print on stdout",
-            "[crate-name|file-names|sysroot|target-libdir|cfg|check-cfg|calling-conventions|\
-             target-list|target-cpus|target-features|relocation-models|code-models|\
-             tls-models|target-spec-json|all-target-specs-json|native-static-libs|\
-             stack-protector-strategies|link-args|deployment-target]",
+            &PRINT_KINDS_STRING,
         ),
         opt(Stable, FlagMulti, "g", "", "Equivalent to -C debuginfo=2", ""),
         opt(Stable, FlagMulti, "O", "", "Equivalent to -C opt-level=3", ""),
@@ -2002,32 +2028,6 @@ fn collect_print_requests(
         prints.push(PrintRequest { kind: PrintKind::TargetFeatures, out: OutFileName::Stdout });
         cg.target_feature = String::new();
     }
-
-    const PRINT_KINDS: &[(&str, PrintKind)] = &[
-        // tidy-alphabetical-start
-        ("all-target-specs-json", PrintKind::AllTargetSpecs),
-        ("calling-conventions", PrintKind::CallingConventions),
-        ("cfg", PrintKind::Cfg),
-        ("check-cfg", PrintKind::CheckCfg),
-        ("code-models", PrintKind::CodeModels),
-        ("crate-name", PrintKind::CrateName),
-        ("deployment-target", PrintKind::DeploymentTarget),
-        ("file-names", PrintKind::FileNames),
-        ("host-tuple", PrintKind::HostTuple),
-        ("link-args", PrintKind::LinkArgs),
-        ("native-static-libs", PrintKind::NativeStaticLibs),
-        ("relocation-models", PrintKind::RelocationModels),
-        ("split-debuginfo", PrintKind::SplitDebuginfo),
-        ("stack-protector-strategies", PrintKind::StackProtectorStrategies),
-        ("sysroot", PrintKind::Sysroot),
-        ("target-cpus", PrintKind::TargetCPUs),
-        ("target-features", PrintKind::TargetFeatures),
-        ("target-libdir", PrintKind::TargetLibdir),
-        ("target-list", PrintKind::TargetList),
-        ("target-spec-json", PrintKind::TargetSpec),
-        ("tls-models", PrintKind::TlsModels),
-        // tidy-alphabetical-end
-    ];
 
     // We disallow reusing the same path in multiple prints, such as `--print
     // cfg=output.txt --print link-args=output.txt`, because outputs are printed
@@ -2814,8 +2814,8 @@ impl fmt::Display for CrateType {
 }
 
 impl IntoDiagArg for CrateType {
-    fn into_diag_arg(self) -> DiagArgValue {
-        self.to_string().into_diag_arg()
+    fn into_diag_arg(self, _: &mut Option<std::path::PathBuf>) -> DiagArgValue {
+        self.to_string().into_diag_arg(&mut None)
     }
 }
 
@@ -2887,14 +2887,6 @@ impl PpMode {
             | StableMir => true,
         }
     }
-    pub fn needs_hir(&self) -> bool {
-        use PpMode::*;
-        match *self {
-            Source(_) | AstTree | AstTreeExpanded => false,
-
-            Hir(_) | HirTree | ThirTree | ThirFlat | Mir | MirCFG | StableMir => true,
-        }
-    }
 
     pub fn needs_analysis(&self) -> bool {
         use PpMode::*;
@@ -2928,15 +2920,16 @@ pub enum WasiExecModel {
 /// how the hash should be calculated when adding a new command-line argument.
 pub(crate) mod dep_tracking {
     use std::collections::BTreeMap;
-    use std::hash::{DefaultHasher, Hash};
+    use std::hash::Hash;
     use std::num::NonZero;
     use std::path::PathBuf;
 
     use rustc_abi::Align;
     use rustc_data_structures::fx::FxIndexMap;
-    use rustc_data_structures::stable_hasher::Hash64;
+    use rustc_data_structures::stable_hasher::StableHasher;
     use rustc_errors::LanguageIdentifier;
     use rustc_feature::UnstableFeatures;
+    use rustc_hashes::Hash64;
     use rustc_span::RealFileName;
     use rustc_span::edition::Edition;
     use rustc_target::spec::{
@@ -2960,7 +2953,7 @@ pub(crate) mod dep_tracking {
     pub(crate) trait DepTrackingHash {
         fn hash(
             &self,
-            hasher: &mut DefaultHasher,
+            hasher: &mut StableHasher,
             error_format: ErrorOutputType,
             for_crate_hash: bool,
         );
@@ -2969,7 +2962,7 @@ pub(crate) mod dep_tracking {
     macro_rules! impl_dep_tracking_hash_via_hash {
         ($($t:ty),+ $(,)?) => {$(
             impl DepTrackingHash for $t {
-                fn hash(&self, hasher: &mut DefaultHasher, _: ErrorOutputType, _for_crate_hash: bool) {
+                fn hash(&self, hasher: &mut StableHasher, _: ErrorOutputType, _for_crate_hash: bool) {
                     Hash::hash(self, hasher);
                 }
             }
@@ -2979,7 +2972,7 @@ pub(crate) mod dep_tracking {
     impl<T: DepTrackingHash> DepTrackingHash for Option<T> {
         fn hash(
             &self,
-            hasher: &mut DefaultHasher,
+            hasher: &mut StableHasher,
             error_format: ErrorOutputType,
             for_crate_hash: bool,
         ) {
@@ -3064,7 +3057,7 @@ pub(crate) mod dep_tracking {
     {
         fn hash(
             &self,
-            hasher: &mut DefaultHasher,
+            hasher: &mut StableHasher,
             error_format: ErrorOutputType,
             for_crate_hash: bool,
         ) {
@@ -3083,7 +3076,7 @@ pub(crate) mod dep_tracking {
     {
         fn hash(
             &self,
-            hasher: &mut DefaultHasher,
+            hasher: &mut StableHasher,
             error_format: ErrorOutputType,
             for_crate_hash: bool,
         ) {
@@ -3099,7 +3092,7 @@ pub(crate) mod dep_tracking {
     impl<T: DepTrackingHash> DepTrackingHash for Vec<T> {
         fn hash(
             &self,
-            hasher: &mut DefaultHasher,
+            hasher: &mut StableHasher,
             error_format: ErrorOutputType,
             for_crate_hash: bool,
         ) {
@@ -3114,7 +3107,7 @@ pub(crate) mod dep_tracking {
     impl<T: DepTrackingHash, V: DepTrackingHash> DepTrackingHash for FxIndexMap<T, V> {
         fn hash(
             &self,
-            hasher: &mut DefaultHasher,
+            hasher: &mut StableHasher,
             error_format: ErrorOutputType,
             for_crate_hash: bool,
         ) {
@@ -3129,7 +3122,7 @@ pub(crate) mod dep_tracking {
     impl DepTrackingHash for OutputTypes {
         fn hash(
             &self,
-            hasher: &mut DefaultHasher,
+            hasher: &mut StableHasher,
             error_format: ErrorOutputType,
             for_crate_hash: bool,
         ) {
@@ -3146,7 +3139,7 @@ pub(crate) mod dep_tracking {
     // This is a stable hash because BTreeMap is a sorted container
     pub(crate) fn stable_hash(
         sub_hashes: BTreeMap<&'static str, &dyn DepTrackingHash>,
-        hasher: &mut DefaultHasher,
+        hasher: &mut StableHasher,
         error_format: ErrorOutputType,
         for_crate_hash: bool,
     ) {

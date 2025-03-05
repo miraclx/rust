@@ -58,7 +58,7 @@ fn filter_assoc_items_by_name_and_namespace(
     assoc_items_of: DefId,
     ident: Ident,
     ns: Namespace,
-) -> impl Iterator<Item = &ty::AssocItem> + '_ {
+) -> impl Iterator<Item = &ty::AssocItem> {
     tcx.associated_items(assoc_items_of).filter_by_name_unhygienic(ident.name).filter(move |item| {
         item.kind.namespace() == ns && tcx.hygienic_eq(ident, item.ident(tcx), assoc_items_of)
     })
@@ -1983,7 +1983,7 @@ fn resolution_failure(
                                     .tcx
                                     .resolutions(())
                                     .all_macro_rules
-                                    .contains_key(&Symbol::intern(path_str))
+                                    .contains(&Symbol::intern(path_str))
                             {
                                 diag.note(format!(
                                     "`macro_rules` named `{path_str}` exists in this crate, \

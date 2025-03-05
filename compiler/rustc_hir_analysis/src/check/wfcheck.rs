@@ -16,7 +16,6 @@ use rustc_lint_defs::builtin::SUPERTRAIT_ITEM_SHADOWING_DEFINITION;
 use rustc_macros::LintDiagnostic;
 use rustc_middle::mir::interpret::ErrorHandled;
 use rustc_middle::query::Providers;
-use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::trait_def::TraitSpecializationKind;
 use rustc_middle::ty::{
     self, AdtKind, GenericArgKind, GenericArgs, GenericParamDefKind, Ty, TyCtxt, TypeFoldable,
@@ -127,13 +126,14 @@ where
 
     let infcx_compat = infcx.fork();
 
-    // We specifically want to call the non-compat version of `implied_bounds_tys`; we do this always.
+    // We specifically want to *disable* the implied bounds hack, first,
+    // so we can detect when failures are due to bevy's implied bounds.
     let outlives_env = OutlivesEnvironment::new_with_implied_bounds_compat(
         &infcx,
         body_def_id,
         param_env,
         assumed_wf_types.iter().copied(),
-        false,
+        true,
     );
 
     lint_redundant_lifetimes(tcx, body_def_id, &outlives_env);
@@ -143,54 +143,22 @@ where
         return Ok(());
     }
 
-    let is_bevy = 'is_bevy: {
-        // We don't want to emit this for dependents of Bevy, for now.
-        // See #119956
-        let is_bevy_paramset = |def: ty::AdtDef<'_>| {
-            let adt_did = with_no_trimmed_paths!(infcx.tcx.def_path_str(def.0.did));
-            adt_did.contains("ParamSet")
-        };
-        for ty in assumed_wf_types.iter() {
-            match ty.kind() {
-                ty::Adt(def, _) => {
-                    if is_bevy_paramset(*def) {
-                        break 'is_bevy true;
-                    }
-                }
-                ty::Ref(_, ty, _) => match ty.kind() {
-                    ty::Adt(def, _) => {
-                        if is_bevy_paramset(*def) {
-                            break 'is_bevy true;
-                        }
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-        }
-        false
-    };
-
-    // If we have set `no_implied_bounds_compat`, then do not attempt compatibility.
-    // We could also just always enter if `is_bevy`, and call `implied_bounds_tys`,
-    // but that does result in slightly more work when this option is set and
-    // just obscures what we mean here anyways. Let's just be explicit.
-    if is_bevy && !infcx.tcx.sess.opts.unstable_opts.no_implied_bounds_compat {
-        let outlives_env = OutlivesEnvironment::new_with_implied_bounds_compat(
-            &infcx,
-            body_def_id,
-            param_env,
-            assumed_wf_types,
-            true,
-        );
-        let errors_compat = infcx_compat.resolve_regions_with_outlives_env(&outlives_env);
-        if errors_compat.is_empty() {
-            Ok(())
-        } else {
-            Err(infcx_compat.err_ctxt().report_region_errors(body_def_id, &errors_compat))
-        }
+    let outlives_env = OutlivesEnvironment::new_with_implied_bounds_compat(
+        &infcx_compat,
+        body_def_id,
+        param_env,
+        assumed_wf_types,
+        // Don't *disable* the implied bounds hack; though this will only apply
+        // the implied bounds hack if this contains `bevy_ecs`'s `ParamSet` type.
+        false,
+    );
+    let errors_compat = infcx_compat.resolve_regions_with_outlives_env(&outlives_env);
+    if errors_compat.is_empty() {
+        // FIXME: Once we fix bevy, this would be the place to insert a warning
+        // to upgrade bevy.
+        Ok(())
     } else {
-        Err(infcx.err_ctxt().report_region_errors(body_def_id, &errors))
+        Err(infcx_compat.err_ctxt().report_region_errors(body_def_id, &errors_compat))
     }
 }
 
@@ -203,7 +171,7 @@ fn check_well_formed(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Result<(), ErrorGua
         hir::Node::ImplItem(item) => check_impl_item(tcx, item),
         hir::Node::ForeignItem(item) => check_foreign_item(tcx, item),
         hir::Node::OpaqueTy(_) => Ok(crate::check::check::check_item_type(tcx, def_id)),
-        _ => unreachable!(),
+        _ => unreachable!("{node:?}"),
     };
 
     if let Some(generics) = node.generics() {
@@ -855,7 +823,7 @@ fn could_be_self(trait_def_id: LocalDefId, ty: &hir::Ty<'_>) -> bool {
 /// In such cases, suggest using `Self` instead.
 fn check_dyn_incompatible_self_trait_by_name(tcx: TyCtxt<'_>, item: &hir::TraitItem<'_>) {
     let (trait_name, trait_def_id) =
-        match tcx.hir_node_by_def_id(tcx.hir().get_parent_item(item.hir_id()).def_id) {
+        match tcx.hir_node_by_def_id(tcx.hir_get_parent_item(item.hir_id()).def_id) {
             hir::Node::Item(item) => match item.kind {
                 hir::ItemKind::Trait(..) => (item.ident, item.owner_id),
                 _ => return,
@@ -968,7 +936,7 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) -> Result<(), 
             let ty = tcx.type_of(param.def_id).instantiate_identity();
 
             if tcx.features().unsized_const_params() {
-                enter_wf_checking_ctxt(tcx, hir_ty.span, param.def_id, |wfcx| {
+                enter_wf_checking_ctxt(tcx, hir_ty.span, tcx.local_parent(param.def_id), |wfcx| {
                     wfcx.register_bound(
                         ObligationCause::new(
                             hir_ty.span,
@@ -982,7 +950,7 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) -> Result<(), 
                     Ok(())
                 })
             } else if tcx.features().adt_const_params() {
-                enter_wf_checking_ctxt(tcx, hir_ty.span, param.def_id, |wfcx| {
+                enter_wf_checking_ctxt(tcx, hir_ty.span, tcx.local_parent(param.def_id), |wfcx| {
                     wfcx.register_bound(
                         ObligationCause::new(
                             hir_ty.span,
@@ -1110,7 +1078,13 @@ fn check_associated_item(
                 let ty = tcx.type_of(item.def_id).instantiate_identity();
                 let ty = wfcx.normalize(span, Some(WellFormedLoc::Ty(item_id)), ty);
                 wfcx.register_wf_obligation(span, loc, ty.into());
-                check_sized_if_body(wfcx, item.def_id.expect_local(), ty, Some(span));
+                check_sized_if_body(
+                    wfcx,
+                    item.def_id.expect_local(),
+                    ty,
+                    Some(span),
+                    ObligationCauseCode::SizedConstOrStatic,
+                );
                 Ok(())
             }
             ty::AssocKind::Fn => {
@@ -1163,7 +1137,7 @@ fn check_type_defn<'tcx>(
                     // be refactored to check the instantiate-ability of the code better.
                     if let Some(def_id) = def_id.as_local()
                         && let hir::Node::AnonConst(anon) = tcx.hir_node_by_def_id(def_id)
-                        && let expr = &tcx.hir().body(anon.body).value
+                        && let expr = &tcx.hir_body(anon.body).value
                         && let hir::ExprKind::Path(hir::QPath::Resolved(None, path)) = expr.kind
                         && let Res::Def(DefKind::ConstParam, _def_id) = path.res
                     {
@@ -1356,7 +1330,7 @@ fn check_item_type(
                 traits::ObligationCause::new(
                     ty_span,
                     wfcx.body_def_id,
-                    ObligationCauseCode::WellFormed(None),
+                    ObligationCauseCode::SizedConstOrStatic,
                 ),
                 wfcx.param_env,
                 item_ty,
@@ -1700,6 +1674,7 @@ fn check_fn_or_method<'tcx>(
             hir::FnRetTy::Return(ty) => Some(ty.span),
             hir::FnRetTy::DefaultReturn(_) => None,
         },
+        ObligationCauseCode::SizedReturnType,
     );
 }
 
@@ -1708,13 +1683,14 @@ fn check_sized_if_body<'tcx>(
     def_id: LocalDefId,
     ty: Ty<'tcx>,
     maybe_span: Option<Span>,
+    code: ObligationCauseCode<'tcx>,
 ) {
     let tcx = wfcx.tcx();
-    if let Some(body) = tcx.hir().maybe_body_owned_by(def_id) {
+    if let Some(body) = tcx.hir_maybe_body_owned_by(def_id) {
         let span = maybe_span.unwrap_or(body.value.span);
 
         wfcx.register_bound(
-            ObligationCause::new(span, def_id, traits::ObligationCauseCode::SizedReturnType),
+            ObligationCause::new(span, def_id, code),
             wfcx.param_env,
             ty,
             tcx.require_lang_item(LangItem::Sized, Some(span)),
