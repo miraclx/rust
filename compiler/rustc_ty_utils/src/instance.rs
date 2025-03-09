@@ -112,6 +112,7 @@ fn resolve_associated_item<'tcx>(
             | CodegenObligationError::Unimplemented
             | CodegenObligationError::FulfillmentError,
         ) => return Ok(None),
+        Err(CodegenObligationError::UnconstrainedParam(guar)) => return Err(guar),
     };
 
     // Now that we know which impl is being used, we can dispatch to
@@ -380,8 +381,7 @@ fn resolve_associated_item<'tcx>(
             }
         }
         traits::ImplSource::Param(..)
-        | traits::ImplSource::Builtin(BuiltinImplSource::TraitUpcasting { .. }, _)
-        | traits::ImplSource::Builtin(BuiltinImplSource::TupleUnsizing, _) => None,
+        | traits::ImplSource::Builtin(BuiltinImplSource::TraitUpcasting { .. }, _) => None,
     })
 }
 

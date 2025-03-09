@@ -1,7 +1,7 @@
 [package]
 name = "rustc-main"
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 # tidy-alphabetical-start
@@ -32,3 +32,6 @@ llvm = ['rustc_driver_impl/llvm']
 max_level_info = ['rustc_driver_impl/max_level_info']
 rustc_randomized_layouts = ['rustc_driver_impl/rustc_randomized_layouts']
 # tidy-alphabetical-end
+
+[lints]
+workspace = true

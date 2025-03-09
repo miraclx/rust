@@ -11,8 +11,6 @@ pub mod args;
 #[path = "../unsupported/env.rs"]
 pub mod env;
 //pub mod fd;
-#[path = "../unsupported/fs.rs"]
-pub mod fs;
 pub mod os;
 #[path = "../unsupported/pipe.rs"]
 pub mod pipe;
@@ -148,5 +146,5 @@ pub fn unsupported<T>() -> std_io::Result<T> {
 }
 
 pub fn unsupported_err() -> std_io::Error {
-    std_io::Error::new(std_io::ErrorKind::Unsupported, "operation not supported on this platform")
+    std_io::Error::UNSUPPORTED_PLATFORM
 }

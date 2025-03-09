@@ -10,7 +10,7 @@ error: layout_of(E) = Layout {
                abi: Align(4 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Arbitrary {
@@ -31,6 +31,7 @@ error: layout_of(E) = Layout {
                    valid_range: 0..=0,
                },
            ),
+           uninhabited: false,
            variants: Multiple {
                tag: Initialized {
                    value: Int(
@@ -48,7 +49,7 @@ error: layout_of(E) = Layout {
                            abi: Align(1 bytes),
                            pref: $SOME_ALIGN,
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -56,6 +57,7 @@ error: layout_of(E) = Layout {
                            memory_index: [],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 0,
                        },
@@ -69,7 +71,9 @@ error: layout_of(E) = Layout {
                            abi: Align(4 bytes),
                            pref: $SOME_ALIGN,
                        },
-                       abi: Uninhabited,
+                       backend_repr: Memory {
+                           sized: true,
+                       },
                        fields: Arbitrary {
                            offsets: [
                                Size(4 bytes),
@@ -83,6 +87,7 @@ error: layout_of(E) = Layout {
                            ],
                        },
                        largest_niche: None,
+                       uninhabited: true,
                        variants: Single {
                            index: 1,
                        },
@@ -107,7 +112,7 @@ error: layout_of(S) = Layout {
                abi: Align(4 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: ScalarPair(
+           backend_repr: ScalarPair(
                Initialized {
                    value: Int(
                        I32,
@@ -136,6 +141,7 @@ error: layout_of(S) = Layout {
                ],
            },
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -154,13 +160,14 @@ error: layout_of(U) = Layout {
                abi: Align(4 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Union(
                2,
            ),
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -179,7 +186,7 @@ error: layout_of(Result<i32, i32>) = Layout {
                abi: Align(4 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: ScalarPair(
+           backend_repr: ScalarPair(
                Initialized {
                    value: Int(
                        I32,
@@ -213,6 +220,7 @@ error: layout_of(Result<i32, i32>) = Layout {
                    valid_range: 0..=1,
                },
            ),
+           uninhabited: false,
            variants: Multiple {
                tag: Initialized {
                    value: Int(
@@ -230,7 +238,7 @@ error: layout_of(Result<i32, i32>) = Layout {
                            abi: Align(4 bytes),
                            pref: $SOME_ALIGN,
                        },
-                       abi: ScalarPair(
+                       backend_repr: ScalarPair(
                            Initialized {
                                value: Int(
                                    I32,
@@ -255,6 +263,7 @@ error: layout_of(Result<i32, i32>) = Layout {
                            ],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 0,
                        },
@@ -268,7 +277,7 @@ error: layout_of(Result<i32, i32>) = Layout {
                            abi: Align(4 bytes),
                            pref: $SOME_ALIGN,
                        },
-                       abi: ScalarPair(
+                       backend_repr: ScalarPair(
                            Initialized {
                                value: Int(
                                    I32,
@@ -293,6 +302,7 @@ error: layout_of(Result<i32, i32>) = Layout {
                            ],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 1,
                        },
@@ -317,7 +327,7 @@ error: layout_of(i32) = Layout {
                abi: Align(4 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Scalar(
+           backend_repr: Scalar(
                Initialized {
                    value: Int(
                        I32,
@@ -328,6 +338,7 @@ error: layout_of(i32) = Layout {
            ),
            fields: Primitive,
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -346,13 +357,14 @@ error: layout_of(V) = Layout {
                abi: Align(2 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Union(
                2,
            ),
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -371,13 +383,14 @@ error: layout_of(W) = Layout {
                abi: Align(2 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Union(
                2,
            ),
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -396,13 +409,14 @@ error: layout_of(Y) = Layout {
                abi: Align(2 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Union(
                2,
            ),
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -421,13 +435,14 @@ error: layout_of(P1) = Layout {
                abi: Align(1 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Union(
                1,
            ),
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -446,13 +461,14 @@ error: layout_of(P2) = Layout {
                abi: Align(1 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Union(
                1,
            ),
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -471,13 +487,14 @@ error: layout_of(P3) = Layout {
                abi: Align(1 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Union(
                1,
            ),
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -496,13 +513,14 @@ error: layout_of(P4) = Layout {
                abi: Align(1 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Union(
                1,
            ),
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -521,7 +539,7 @@ error: layout_of(P5) = Layout {
                abi: Align(1 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Scalar(
+           backend_repr: Scalar(
                Union {
                    value: Int(
                        I8,
@@ -533,6 +551,7 @@ error: layout_of(P5) = Layout {
                2,
            ),
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -551,7 +570,7 @@ error: layout_of(MaybeUninit<u8>) = Layout {
                abi: Align(1 bytes),
                pref: $SOME_ALIGN,
            },
-           abi: Scalar(
+           backend_repr: Scalar(
                Union {
                    value: Int(
                        I8,
@@ -563,6 +582,7 @@ error: layout_of(MaybeUninit<u8>) = Layout {
                2,
            ),
            largest_niche: None,
+           uninhabited: false,
            variants: Single {
                index: 0,
            },
@@ -596,12 +616,18 @@ error: the type has an unknown layout
 LL | union EmptyUnion {}
    | ^^^^^^^^^^^^^^^^
 
+error: the type `T` does not have a fixed layout
+  --> $DIR/debug.rs:89:1
+   |
+LL | type TooGeneric<T> = T;
+   | ^^^^^^^^^^^^^^^^^^
+
 error: `#[rustc_layout]` can only be applied to `struct`/`enum`/`union` declarations and type aliases
   --> $DIR/debug.rs:75:5
    |
 LL |     const C: () = ();
    |     ^^^^^^^^^^^
 
-error: aborting due to 19 previous errors
+error: aborting due to 20 previous errors
 
 For more information about this error, try `rustc --explain E0277`.

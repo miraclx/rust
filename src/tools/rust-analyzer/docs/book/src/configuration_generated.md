@@ -470,9 +470,9 @@ The warnings will be indicated by a blue squiggly underline in code
 and a blue icon in the `Problems Panel`.
 
 
-**rust-analyzer.files.excludeDirs** (default: [])
+**rust-analyzer.files.exclude** (default: [])
 
- These directories will be ignored by rust-analyzer. They are
+ These paths (file/directories) will be ignored by rust-analyzer. They are
 relative to the workspace root, and globs are not supported. You may
 also need to add the folders to Code's `files.watcherExclude`.
 
@@ -557,6 +557,11 @@ also need to add the folders to Code's `files.watcherExclude`.
 
  Whether to show keyword hover popups. Only applies when
 `#rust-analyzer.hover.documentation.enable#` is set.
+
+
+**rust-analyzer.hover.dropGlue.enable** (default: true)
+
+ Whether to show drop glue information on hover.
 
 
 **rust-analyzer.hover.links.enable** (default: true)

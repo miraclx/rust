@@ -95,7 +95,7 @@ fn impl_item_implementor_ids(tcx: TyCtxt<'_>, impl_id: DefId) -> DefIdMap<DefId>
 
 fn associated_item(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::AssocItem {
     let id = tcx.local_def_id_to_hir_id(def_id);
-    let parent_def_id = tcx.hir().get_parent_item(id);
+    let parent_def_id = tcx.hir_get_parent_item(id);
     let parent_item = tcx.hir().expect_item(parent_def_id.def_id);
     match parent_item.kind {
         hir::ItemKind::Impl(impl_) => {
@@ -252,7 +252,8 @@ fn associated_type_for_impl_trait_in_trait(
     assert_eq!(tcx.def_kind(trait_def_id), DefKind::Trait);
 
     let span = tcx.def_span(opaque_ty_def_id);
-    let trait_assoc_ty = tcx.at(span).create_def(trait_def_id, kw::Empty, DefKind::AssocTy);
+    // No name because this is a synthetic associated type.
+    let trait_assoc_ty = tcx.at(span).create_def(trait_def_id, None, DefKind::AssocTy);
 
     let local_def_id = trait_assoc_ty.def_id();
     let def_id = local_def_id.to_def_id();
@@ -304,7 +305,8 @@ fn associated_type_for_impl_trait_in_impl(
         hir::FnRetTy::DefaultReturn(_) => tcx.def_span(impl_fn_def_id),
         hir::FnRetTy::Return(ty) => ty.span,
     };
-    let impl_assoc_ty = tcx.at(span).create_def(impl_local_def_id, kw::Empty, DefKind::AssocTy);
+    // No name because this is a synthetic associated type.
+    let impl_assoc_ty = tcx.at(span).create_def(impl_local_def_id, None, DefKind::AssocTy);
 
     let local_def_id = impl_assoc_ty.def_id();
     let def_id = local_def_id.to_def_id();

@@ -5,7 +5,6 @@
 #![feature(coroutines)]
 #![feature(decl_macro)]
 #![feature(error_iter)]
-#![feature(extract_if)]
 #![feature(file_buffered)]
 #![feature(if_let_guard)]
 #![feature(iter_from_coroutine)]
@@ -16,7 +15,6 @@
 #![feature(proc_macro_internals)]
 #![feature(rustdoc_internals)]
 #![feature(trusted_len)]
-#![warn(unreachable_pub)]
 // tidy-alphabetical-end
 
 extern crate proc_macro;

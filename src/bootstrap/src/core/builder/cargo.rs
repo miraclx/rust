@@ -260,7 +260,7 @@ impl Cargo {
             }
         }
 
-        for arg in linker_args(builder, compiler.host, LldThreads::Yes) {
+        for arg in linker_args(builder, compiler.host, LldThreads::Yes, 0) {
             self.hostflags.arg(&arg);
         }
 
@@ -270,10 +270,10 @@ impl Cargo {
         }
         // We want to set -Clinker using Cargo, therefore we only call `linker_flags` and not
         // `linker_args` here.
-        for flag in linker_flags(builder, target, LldThreads::Yes) {
+        for flag in linker_flags(builder, target, LldThreads::Yes, compiler.stage) {
             self.rustflags.arg(&flag);
         }
-        for arg in linker_args(builder, target, LldThreads::Yes) {
+        for arg in linker_args(builder, target, LldThreads::Yes, compiler.stage) {
             self.rustdocflags.arg(&arg);
         }
 
@@ -285,10 +285,7 @@ impl Cargo {
 
         // Ignore linker warnings for now. These are complicated to fix and don't affect the build.
         // FIXME: we should really investigate these...
-        // cfg(bootstrap)
-        if compiler.stage != 0 {
-            self.rustflags.arg("-Alinker-messages");
-        }
+        self.rustflags.arg("-Alinker-messages");
 
         // Throughout the build Cargo can execute a number of build scripts
         // compiling C/C++ code and we need to pass compilers, archivers, flags, etc
@@ -600,7 +597,7 @@ impl Builder<'_> {
         // sysroot. Passing this cfg enables raw-dylib support instead, which makes the native
         // library unnecessary. This can be removed when windows-rs enables raw-dylib
         // unconditionally.
-        if let Mode::Rustc | Mode::ToolRustc = mode {
+        if let Mode::Rustc | Mode::ToolRustc | Mode::ToolBootstrap = mode {
             rustflags.arg("--cfg=windows_raw_dylib");
         }
 
@@ -611,11 +608,10 @@ impl Builder<'_> {
         }
 
         // FIXME: the following components don't build with `-Zrandomize-layout` yet:
-        // - wasm-component-ld, due to the `wast`crate
         // - rust-analyzer, due to the rowan crate
-        // so we exclude entire categories of steps here due to lack of fine-grained control over
+        // so we exclude an entire category of steps here due to lack of fine-grained control over
         // rustflags.
-        if self.config.rust_randomize_layout && mode != Mode::ToolStd && mode != Mode::ToolRustc {
+        if self.config.rust_randomize_layout && mode != Mode::ToolRustc {
             rustflags.arg("-Zrandomize-layout");
         }
 
@@ -779,6 +775,12 @@ impl Builder<'_> {
             Mode::Codegen => metadata.push_str("codegen"),
             _ => {}
         }
+        // `rustc_driver`'s version number is always `0.0.0`, which can cause linker search path
+        // problems on side-by-side installs because we don't include the version number of the
+        // `rustc_driver` being built. This can cause builds of different version numbers to produce
+        // `librustc_driver*.so` artifacts that end up with identical filename hashes.
+        metadata.push_str(&self.version);
+
         cargo.env("__CARGO_DEFAULT_LIB_METADATA", &metadata);
 
         if cmd_kind == Kind::Clippy {
@@ -924,8 +926,7 @@ impl Builder<'_> {
 
         if self.config.rust_remap_debuginfo {
             let mut env_var = OsString::new();
-            if self.config.vendor {
-                let vendor = self.build.src.join("vendor");
+            if let Some(vendor) = self.build.vendored_crates_path() {
                 env_var.push(vendor);
                 env_var.push("=/rust/deps");
             } else {
@@ -1071,15 +1072,17 @@ impl Builder<'_> {
         }
 
         if mode == Mode::Rustc {
+            // NOTE: rustc-specific lints are specified here. Normal rust lints
+            // are specified in the `[workspace.lints.rust]` section in the
+            // top-level `Cargo.toml`. If/when tool lints are supported by
+            // Cargo, these lints can be move to a `[workspace.lints.rustc]`
+            // section in the top-level `Cargo.toml`.
+            //
+            // NOTE: these flags are added to RUSTFLAGS, which is ignored when
+            // compiling proc macro crates such as `rustc_macros`,
+            // unfortunately.
             rustflags.arg("-Wrustc::internal");
-            // cfg(bootstrap) - remove this check when lint is in bootstrap compiler
-            if stage != 0 {
-                rustflags.arg("-Drustc::symbol_intern_string_literal");
-            }
-            // FIXME(edition_2024): Change this to `-Wrust_2024_idioms` when all
-            // of the individual lints are satisfied.
-            rustflags.arg("-Wkeyword_idents_2024");
-            rustflags.arg("-Wunsafe_op_in_unsafe_fn");
+            rustflags.arg("-Drustc::symbol_intern_string_literal");
         }
 
         if self.config.rust_frame_pointers {

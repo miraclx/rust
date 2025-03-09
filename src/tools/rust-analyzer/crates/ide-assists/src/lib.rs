@@ -149,6 +149,7 @@ mod handlers {
     mod fix_visibility;
     mod flip_binexpr;
     mod flip_comma;
+    mod flip_or_pattern;
     mod flip_trait_bound;
     mod generate_constant;
     mod generate_default_from_enum_variant;
@@ -270,6 +271,7 @@ mod handlers {
             destructure_tuple_binding::destructure_tuple_binding,
             destructure_struct_binding::destructure_struct_binding,
             expand_glob_import::expand_glob_import,
+            expand_glob_import::expand_glob_reexport,
             explicit_enum_discriminant::explicit_enum_discriminant,
             extract_expressions_from_format_string::extract_expressions_from_format_string,
             extract_struct_from_enum_variant::extract_struct_from_enum_variant,
@@ -278,6 +280,7 @@ mod handlers {
             fix_visibility::fix_visibility,
             flip_binexpr::flip_binexpr,
             flip_comma::flip_comma,
+            flip_or_pattern::flip_or_pattern,
             flip_trait_bound::flip_trait_bound,
             generate_constant::generate_constant,
             generate_default_from_enum_variant::generate_default_from_enum_variant,
