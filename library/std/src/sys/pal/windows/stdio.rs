@@ -1,5 +1,6 @@
 #![unstable(issue = "none", feature = "windows_stdio")]
 
+use core::char::MAX_LEN_UTF8;
 use core::str::utf8_char_width;
 
 use super::api::{self, WinError};
@@ -358,7 +359,7 @@ fn read_u16s(handle: c::HANDLE, buf: &mut [MaybeUninit<u16>]) -> io::Result<usiz
     const CTRL_Z: u16 = 0x1A;
     const CTRL_Z_MASK: u32 = 1 << CTRL_Z;
     let input_control = c::CONSOLE_READCONSOLE_CONTROL {
-        nLength: crate::mem::size_of::<c::CONSOLE_READCONSOLE_CONTROL>() as u32,
+        nLength: size_of::<c::CONSOLE_READCONSOLE_CONTROL>() as u32,
         nInitialChars: 0,
         dwCtrlWakeupMask: CTRL_Z_MASK,
         dwControlKeyState: 0,
@@ -426,7 +427,7 @@ fn utf16_to_utf8(utf16: &[u16], utf8: &mut [u8]) -> io::Result<usize> {
 
 impl IncompleteUtf8 {
     pub const fn new() -> IncompleteUtf8 {
-        IncompleteUtf8 { bytes: [0; 4], len: 0 }
+        IncompleteUtf8 { bytes: [0; MAX_LEN_UTF8], len: 0 }
     }
 }
 

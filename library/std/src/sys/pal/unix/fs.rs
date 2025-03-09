@@ -568,8 +568,7 @@ impl FileAttr {
 
         Err(io::const_error!(
             io::ErrorKind::Unsupported,
-            "creation time is not available on this platform \
-                            currently",
+            "creation time is not available on this platform currently",
         ))
     }
 
@@ -1438,6 +1437,10 @@ impl File {
         Ok(n as u64)
     }
 
+    pub fn tell(&self) -> io::Result<u64> {
+        self.seek(SeekFrom::Current(0))
+    }
+
     pub fn duplicate(&self) -> io::Result<File> {
         self.0.duplicate().map(File)
     }
@@ -1459,11 +1462,11 @@ impl File {
             Some(time) if let Some(ts) = time.t.to_timespec() => Ok(ts),
             Some(time) if time > crate::sys::time::UNIX_EPOCH => Err(io::const_error!(
                 io::ErrorKind::InvalidInput,
-                "timestamp is too large to set as a file time"
+                "timestamp is too large to set as a file time",
             )),
             Some(_) => Err(io::const_error!(
                 io::ErrorKind::InvalidInput,
-                "timestamp is too small to set as a file time"
+                "timestamp is too small to set as a file time",
             )),
             None => Ok(libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT as _ }),
         };
@@ -1502,7 +1505,7 @@ impl File {
                     self.as_raw_fd(),
                     (&raw const attrlist).cast::<libc::c_void>().cast_mut(),
                     buf.as_ptr().cast::<libc::c_void>().cast_mut(),
-                    num_times * mem::size_of::<libc::timespec>(),
+                    num_times * size_of::<libc::timespec>(),
                     0
                 ) })?;
                 Ok(())
@@ -1657,7 +1660,7 @@ impl fmt::Debug for File {
         fn get_path(fd: c_int) -> Option<PathBuf> {
             let info = Box::<libc::kinfo_file>::new_zeroed();
             let mut info = unsafe { info.assume_init() };
-            info.kf_structsize = mem::size_of::<libc::kinfo_file>() as libc::c_int;
+            info.kf_structsize = size_of::<libc::kinfo_file>() as libc::c_int;
             let n = unsafe { libc::fcntl(fd, libc::F_KINFO, &mut *info) };
             if n == -1 {
                 return None;

@@ -277,6 +277,9 @@ impl CargoWorkspace {
     /// Fetches the metadata for the given `cargo_toml` manifest.
     /// A successful result may contain another metadata error if the initial fetching failed but
     /// the `--no-deps` retry succeeded.
+    ///
+    /// The sysroot is used to set the `RUSTUP_TOOLCHAIN` env var when invoking cargo
+    /// to ensure that the rustup proxy uses the correct toolchain.
     pub fn fetch_metadata(
         cargo_toml: &ManifestPath,
         current_dir: &AbsPath,
@@ -591,7 +594,9 @@ impl CargoWorkspace {
             .filter_map(|package| {
                 let package = &self[package];
                 if package.is_member {
-                    Some(package.features.keys().cloned())
+                    Some(package.features.keys().cloned().chain(
+                        package.features.keys().map(|key| format!("{}/{key}", package.name)),
+                    ))
                 } else {
                     None
                 }

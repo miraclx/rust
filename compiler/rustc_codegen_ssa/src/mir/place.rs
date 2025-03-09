@@ -1,8 +1,8 @@
 use rustc_abi::Primitive::{Int, Pointer};
 use rustc_abi::{Align, BackendRepr, FieldsShape, Size, TagEncoding, VariantIdx, Variants};
+use rustc_middle::mir::PlaceTy;
 use rustc_middle::mir::interpret::Scalar;
-use rustc_middle::mir::tcx::PlaceTy;
-use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf, TyAndLayout};
+use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv, LayoutOf, TyAndLayout};
 use rustc_middle::ty::{self, Ty};
 use rustc_middle::{bug, mir};
 use tracing::{debug, instrument};
@@ -133,7 +133,7 @@ impl<'a, 'tcx, V: CodegenObject> PlaceRef<'tcx, V> {
         Self::alloca(bx, ptr_layout)
     }
 
-    pub fn len<Cx: ConstCodegenMethods<'tcx, Value = V>>(&self, cx: &Cx) -> V {
+    pub fn len<Cx: ConstCodegenMethods<Value = V>>(&self, cx: &Cx) -> V {
         if let FieldsShape::Array { count, .. } = self.layout.fields {
             if self.layout.is_unsized() {
                 assert_eq!(count, 0);
@@ -168,7 +168,11 @@ impl<'a, 'tcx, V: CodegenObject> PlaceRef<'tcx, V> {
             };
             let val = PlaceValue {
                 llval,
-                llextra: if bx.cx().type_has_metadata(field.ty) { self.val.llextra } else { None },
+                llextra: if bx.cx().tcx().type_has_metadata(field.ty, bx.cx().typing_env()) {
+                    self.val.llextra
+                } else {
+                    None
+                },
                 align: effective_field_align,
             };
             val.with_type(field)
@@ -423,7 +427,7 @@ impl<'a, 'tcx, V: CodegenObject> PlaceRef<'tcx, V> {
             layout.size
         };
 
-        let llval = bx.inbounds_gep(bx.cx().backend_type(layout), self.val.llval, &[llindex]);
+        let llval = bx.inbounds_nuw_gep(bx.cx().backend_type(layout), self.val.llval, &[llindex]);
         let align = self.val.align.restrict_for_offset(offset);
         PlaceValue::new_sized(llval, align).with_type(layout)
     }

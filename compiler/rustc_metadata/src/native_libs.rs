@@ -17,7 +17,7 @@ use rustc_session::search_paths::PathKind;
 use rustc_session::utils::NativeLibKind;
 use rustc_span::def_id::{DefId, LOCAL_CRATE};
 use rustc_span::{Symbol, sym};
-use rustc_target::spec::LinkSelfContainedComponents;
+use rustc_target::spec::{BinaryFormat, LinkSelfContainedComponents};
 
 use crate::{errors, fluent_generated};
 
@@ -263,9 +263,26 @@ impl<'tcx> Collector<'tcx> {
                                 NativeLibKind::Framework { as_needed: None }
                             }
                             "raw-dylib" => {
-                                if !sess.target.is_like_windows {
+                                if sess.target.is_like_windows {
+                                    // raw-dylib is stable and working on Windows
+                                } else if sess.target.binary_format == BinaryFormat::Elf
+                                    && features.raw_dylib_elf()
+                                {
+                                    // raw-dylib is unstable on ELF, but the user opted in
+                                } else if sess.target.binary_format == BinaryFormat::Elf
+                                    && sess.is_nightly_build()
+                                {
+                                    feature_err(
+                                        sess,
+                                        sym::raw_dylib_elf,
+                                        span,
+                                        fluent_generated::metadata_raw_dylib_elf_unstable,
+                                    )
+                                    .emit();
+                                } else {
                                     sess.dcx().emit_err(errors::RawDylibOnlyWindows { span });
                                 }
+
                                 NativeLibKind::RawDylib
                             }
                             "link-arg" => {
@@ -450,7 +467,7 @@ impl<'tcx> Collector<'tcx> {
                 (name, kind) = (wasm_import_module, Some(NativeLibKind::WasmImportModule));
             }
             let Some((name, name_span)) = name else {
-                sess.dcx().emit_err(errors::LinkRequiresName { span: m.span });
+                sess.dcx().emit_err(errors::LinkRequiresName { span: m.span() });
                 continue;
             };
 
@@ -485,7 +502,7 @@ impl<'tcx> Collector<'tcx> {
                             let link_ordinal_attr =
                                 self.tcx.get_attr(child_item, sym::link_ordinal).unwrap();
                             sess.dcx().emit_err(errors::LinkOrdinalRawDylib {
-                                span: link_ordinal_attr.span,
+                                span: link_ordinal_attr.span(),
                             });
                         }
                     }

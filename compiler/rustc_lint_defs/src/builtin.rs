@@ -80,7 +80,6 @@ declare_lint_pass! {
         PRIVATE_BOUNDS,
         PRIVATE_INTERFACES,
         PROC_MACRO_DERIVE_RESOLUTION_FALLBACK,
-        PTR_CAST_ADD_AUTO_TO_OBJECT,
         PTR_TO_INTEGER_TRANSMUTE_IN_CONSTS,
         PUB_USE_OF_PRIVATE_EXTERN_CRATE,
         REDUNDANT_IMPORTS,
@@ -2780,7 +2779,7 @@ declare_lint! {
     ///
     /// ```rust
     /// enum Void {}
-    /// extern {
+    /// unsafe extern {
     ///     static EXTERN: Void;
     /// }
     /// ```
@@ -3782,7 +3781,7 @@ declare_lint! {
     Warn,
     "use of unsupported calling convention for function pointer",
     @future_incompatible = FutureIncompatibleInfo {
-        reason: FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps,
+        reason: FutureIncompatibilityReason::FutureReleaseErrorReportInDeps,
         reference: "issue #130260 <https://github.com/rust-lang/rust/issues/130260>",
     };
 }
@@ -4011,7 +4010,7 @@ declare_lint! {
     /// ```rust
     /// #![warn(ffi_unwind_calls)]
     ///
-    /// extern "C-unwind" {
+    /// unsafe extern "C-unwind" {
     ///     fn foo();
     /// }
     ///
@@ -4755,7 +4754,7 @@ declare_lint! {
     ///
     /// ### Example
     ///
-    /// ```rust
+    /// ```rust,edition2021
     /// #![warn(missing_unsafe_on_extern)]
     /// #![allow(dead_code)]
     ///
@@ -4792,7 +4791,7 @@ declare_lint! {
     ///
     /// ### Example
     ///
-    /// ```rust
+    /// ```rust,edition2021
     /// #![warn(unsafe_attr_outside_unsafe)]
     ///
     /// #[no_mangle]
@@ -4824,58 +4823,6 @@ declare_lint! {
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
         reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-attributes.html>",
-    };
-}
-
-declare_lint! {
-    /// The `ptr_cast_add_auto_to_object` lint detects casts of raw pointers to trait
-    /// objects, which add auto traits.
-    ///
-    /// ### Example
-    ///
-    /// ```rust,edition2021,compile_fail
-    /// let ptr: *const dyn core::any::Any = &();
-    /// _ = ptr as *const dyn core::any::Any + Send;
-    /// ```
-    ///
-    /// {{produces}}
-    ///
-    /// ### Explanation
-    ///
-    /// Adding an auto trait can make the vtable invalid, potentially causing
-    /// UB in safe code afterwards. For example:
-    ///
-    /// ```ignore (causes a warning)
-    /// #![feature(arbitrary_self_types)]
-    ///
-    /// trait Trait {
-    ///     fn f(self: *const Self)
-    ///     where
-    ///         Self: Send;
-    /// }
-    ///
-    /// impl Trait for *const () {
-    ///     fn f(self: *const Self) {
-    ///         unreachable!()
-    ///     }
-    /// }
-    ///
-    /// fn main() {
-    ///     let unsend: *const () = &();
-    ///     let unsend: *const dyn Trait = &unsend;
-    ///     let send_bad: *const (dyn Trait + Send) = unsend as _;
-    ///     send_bad.f(); // this crashes, since vtable for `*const ()` does not have an entry for `f`
-    /// }
-    /// ```
-    ///
-    /// Generally you must ensure that vtable is right for the pointer's type,
-    /// before passing the pointer to safe code.
-    pub PTR_CAST_ADD_AUTO_TO_OBJECT,
-    Warn,
-    "detects `as` casts from pointers to `dyn Trait` to pointers to `dyn Trait + Auto`",
-    @future_incompatible = FutureIncompatibleInfo {
-        reason: FutureIncompatibilityReason::FutureReleaseErrorReportInDeps,
-        reference: "issue #127323 <https://github.com/rust-lang/rust/issues/127323>",
     };
 }
 

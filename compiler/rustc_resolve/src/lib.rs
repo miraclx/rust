@@ -15,7 +15,6 @@
 #![doc(rust_logo)]
 #![feature(assert_matches)]
 #![feature(box_patterns)]
-#![feature(extract_if)]
 #![feature(if_let_guard)]
 #![feature(iter_intersperse)]
 #![feature(let_chains)]
@@ -31,9 +30,7 @@ use std::sync::Arc;
 
 use diagnostics::{ImportSuggestion, LabelSuggestion, Suggestion};
 use effective_visibilities::EffectiveVisibilitiesVisitor;
-use errors::{
-    ParamKindInEnumDiscriminant, ParamKindInNonTrivialAnonConst, ParamKindInTyOfConstParam,
-};
+use errors::{ParamKindInEnumDiscriminant, ParamKindInNonTrivialAnonConst};
 use imports::{Import, ImportData, ImportKind, NameResolution};
 use late::{HasGenericParams, PathSource, PatternSource, UnnecessaryQualification};
 use macros::{MacroRulesBinding, MacroRulesScope, MacroRulesScopeRef};
@@ -277,8 +274,10 @@ enum ResolutionError<'ra> {
     },
     /// Error E0128: generic parameters with a default cannot use forward-declared identifiers.
     ForwardDeclaredGenericParam,
+    // FIXME(generic_const_parameter_types): This should give custom output specifying it's only
+    // problematic to use *forward declared* parameters when the feature is enabled.
     /// ERROR E0770: the type of const parameters must not depend on other generic parameters.
-    ParamInTyOfConstParam { name: Symbol, param_kind: Option<ParamKindInTyOfConstParam> },
+    ParamInTyOfConstParam { name: Symbol },
     /// generic parameters must not be used inside const evaluations.
     ///
     /// This error is only emitted when using `min_const_generics`.
@@ -589,6 +588,19 @@ struct ModuleData<'ra> {
 #[rustc_pass_by_value]
 struct Module<'ra>(Interned<'ra, ModuleData<'ra>>);
 
+// Allows us to use Interned without actually enforcing (via Hash/PartialEq/...) uniqueness of the
+// contained data.
+// FIXME: We may wish to actually have at least debug-level assertions that Interned's guarantees
+// are upheld.
+impl std::hash::Hash for ModuleData<'_> {
+    fn hash<H>(&self, _: &mut H)
+    where
+        H: std::hash::Hasher,
+    {
+        unreachable!()
+    }
+}
+
 impl<'ra> ModuleData<'ra> {
     fn new(
         parent: Option<Module<'ra>>,
@@ -738,6 +750,19 @@ struct NameBindingData<'ra> {
 /// All name bindings are unique and allocated on a same arena,
 /// so we can use referential equality to compare them.
 type NameBinding<'ra> = Interned<'ra, NameBindingData<'ra>>;
+
+// Allows us to use Interned without actually enforcing (via Hash/PartialEq/...) uniqueness of the
+// contained data.
+// FIXME: We may wish to actually have at least debug-level assertions that Interned's guarantees
+// are upheld.
+impl std::hash::Hash for NameBindingData<'_> {
+    fn hash<H>(&self, _: &mut H)
+    where
+        H: std::hash::Hasher,
+    {
+        unreachable!()
+    }
+}
 
 trait ToNameBinding<'ra> {
     fn to_name_binding(self, arenas: &'ra ResolverArenas<'ra>) -> NameBinding<'ra>;
@@ -1194,7 +1219,7 @@ pub struct Resolver<'ra, 'tcx> {
     effective_visibilities: EffectiveVisibilities,
     doc_link_resolutions: FxIndexMap<LocalDefId, DocLinkResMap>,
     doc_link_traits_in_scope: FxIndexMap<LocalDefId, Vec<DefId>>,
-    all_macro_rules: FxHashMap<Symbol, Res>,
+    all_macro_rules: FxHashSet<Symbol>,
 
     /// Invocation ids of all glob delegations.
     glob_delegation_invoc_ids: FxHashSet<LocalExpnId>,
@@ -1315,7 +1340,7 @@ impl<'tcx> Resolver<'_, 'tcx> {
         &mut self,
         parent: LocalDefId,
         node_id: ast::NodeId,
-        name: Symbol,
+        name: Option<Symbol>,
         def_kind: DefKind,
         expn_id: ExpnId,
         span: Span,

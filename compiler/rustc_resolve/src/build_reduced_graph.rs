@@ -1241,7 +1241,7 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
             };
             let binding = (res, vis, span, expansion).to_name_binding(self.r.arenas);
             self.r.set_binding_parent_module(binding, parent_scope.module);
-            self.r.all_macro_rules.insert(ident.name, res);
+            self.r.all_macro_rules.insert(ident.name);
             if is_macro_export {
                 let import = self.r.arenas.alloc_import(ImportData {
                     kind: ImportKind::MacroExport,
@@ -1527,6 +1527,14 @@ impl<'a, 'ra, 'tcx> Visitor<'a> for BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
         self.insert_field_visibilities_local(def_id.to_def_id(), variant.data.fields());
 
         visit::walk_variant(self, variant);
+    }
+
+    fn visit_where_predicate(&mut self, p: &'a ast::WherePredicate) {
+        if p.is_placeholder {
+            self.visit_invoc(p.id);
+        } else {
+            visit::walk_where_predicate(self, p);
+        }
     }
 
     fn visit_crate(&mut self, krate: &'a ast::Crate) {
