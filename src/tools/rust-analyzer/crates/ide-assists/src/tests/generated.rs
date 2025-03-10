@@ -910,6 +910,29 @@ fn qux(bar: Bar, baz: Baz) {}
 }
 
 #[test]
+fn doctest_expand_glob_reexport() {
+    check_doc_test(
+        "expand_glob_reexport",
+        r#####"
+mod foo {
+    pub struct Bar;
+    pub struct Baz;
+}
+
+pub use foo::*$0;
+"#####,
+        r#####"
+mod foo {
+    pub struct Bar;
+    pub struct Baz;
+}
+
+pub use foo::{Bar, Baz};
+"#####,
+    )
+}
+
+#[test]
 fn doctest_explicit_enum_discriminant() {
     check_doc_test(
         "explicit_enum_discriminant",
@@ -1167,6 +1190,23 @@ fn main() {
         r#####"
 fn main() {
     ((3, 4), (1, 2));
+}
+"#####,
+    )
+}
+
+#[test]
+fn doctest_flip_or_pattern() {
+    check_doc_test(
+        "flip_or_pattern",
+        r#####"
+fn foo() {
+    let (a |$0 b) = 1;
+}
+"#####,
+        r#####"
+fn foo() {
+    let (b | a) = 1;
 }
 "#####,
     )
@@ -1938,7 +1978,7 @@ struct Ctx<T: Clone> {
     data: T,
 }
 
-impl<T: Clone> ${0:_} for Ctx<T> {}
+impl<T: Clone> ${1:_} for Ctx<T> {$0}
 "#####,
     )
 }

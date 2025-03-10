@@ -1,7 +1,7 @@
 [package]
 name = "rustc_error_messages"
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 # tidy-alphabetical-start
@@ -19,3 +19,6 @@ rustc_span = { path = "../rustc_span" }
 tracing = "0.1"
 unic-langid = { version = "0.9.0", features = ["macros"] }
 # tidy-alphabetical-end
+
+[lints]
+workspace = true

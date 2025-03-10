@@ -327,8 +327,9 @@ impl Resolver {
                     | LangItemTarget::ImplDef(_)
                     | LangItemTarget::Static(_) => return None,
                 };
+                // Remaining segments start from 0 because lang paths have no segments other than the remaining.
                 return Some((
-                    ResolveValueResult::Partial(type_ns, 1, None),
+                    ResolveValueResult::Partial(type_ns, 0, None),
                     ResolvePathResultPrefixInfo::default(),
                 ));
             }
@@ -531,16 +532,17 @@ impl Resolver {
     /// Note that in Rust one name can be bound to several items:
     ///
     /// ```
+    /// # #![allow(non_camel_case_types)]
     /// macro_rules! t { () => (()) }
     /// type t = t!();
-    /// const t: t = t!()
+    /// const t: t = t!();
     /// ```
     ///
     /// That's why we return a multimap.
     ///
     /// The shadowing is accounted for: in
     ///
-    /// ```
+    /// ```ignore
     /// let it = 92;
     /// {
     ///     let it = 92;

@@ -14,7 +14,6 @@
 #![feature(rustdoc_internals)]
 #![feature(trait_alias)]
 #![feature(try_blocks)]
-#![warn(unreachable_pub)]
 // tidy-alphabetical-end
 
 //! This crate contains codegen code that is used by all codegen backends (LLVM and others).
@@ -75,9 +74,29 @@ pub struct ModuleCodegen<M> {
     pub name: String,
     pub module_llvm: M,
     pub kind: ModuleKind,
+    /// Saving the ThinLTO buffer for embedding in the object file.
+    pub thin_lto_buffer: Option<Vec<u8>>,
 }
 
 impl<M> ModuleCodegen<M> {
+    pub fn new_regular(name: impl Into<String>, module: M) -> Self {
+        Self {
+            name: name.into(),
+            module_llvm: module,
+            kind: ModuleKind::Regular,
+            thin_lto_buffer: None,
+        }
+    }
+
+    pub fn new_allocator(name: impl Into<String>, module: M) -> Self {
+        Self {
+            name: name.into(),
+            module_llvm: module,
+            kind: ModuleKind::Allocator,
+            thin_lto_buffer: None,
+        }
+    }
+
     pub fn into_compiled_module(
         self,
         emit_obj: bool,
@@ -190,6 +209,7 @@ impl From<&cstore::NativeLib> for NativeLib {
 #[derive(Debug, Encodable, Decodable)]
 pub struct CrateInfo {
     pub target_cpu: String,
+    pub target_features: Vec<String>,
     pub crate_types: Vec<CrateType>,
     pub exported_symbols: UnordMap<CrateType, Vec<String>>,
     pub linked_symbols: FxIndexMap<CrateType, Vec<(String, SymbolExportKind)>>,
@@ -230,6 +250,7 @@ pub fn provide(providers: &mut Providers) {
     crate::base::provide(providers);
     crate::target_features::provide(providers);
     crate::codegen_attrs::provide(providers);
+    providers.queries.global_backend_features = |_tcx: TyCtxt<'_>, ()| vec![];
 }
 
 /// Checks if the given filename ends with the `.rcgu.o` extension that `rustc`

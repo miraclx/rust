@@ -15,13 +15,11 @@
 
 pub mod args;
 pub mod env;
-pub mod fs;
 pub mod helpers;
 pub mod os;
 #[path = "../unsupported/pipe.rs"]
 pub mod pipe;
 pub mod process;
-pub mod stdio;
 pub mod thread;
 pub mod time;
 
@@ -90,7 +88,7 @@ pub const fn unsupported<T>() -> std_io::Result<T> {
 
 #[inline]
 pub const fn unsupported_err() -> std_io::Error {
-    std_io::const_error!(std_io::ErrorKind::Unsupported, "operation not supported on UEFI",)
+    std_io::const_error!(std_io::ErrorKind::Unsupported, "operation not supported on UEFI")
 }
 
 pub fn decode_error_kind(code: RawOsError) -> crate::io::ErrorKind {

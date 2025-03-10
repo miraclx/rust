@@ -136,21 +136,10 @@ use self::foo as bar;
 fn test_highlighting() {
     check_highlighting(
         r#"
-//- minicore: derive, copy
+//- minicore: derive, copy, fn
 //- /main.rs crate:main deps:foo
 use inner::{self as inner_mod};
 mod inner {}
-
-pub mod ops {
-    #[lang = "fn_once"]
-    pub trait FnOnce<Args> {}
-
-    #[lang = "fn_mut"]
-    pub trait FnMut<Args>: FnOnce<Args> {}
-
-    #[lang = "fn"]
-    pub trait Fn<Args>: FnMut<Args> {}
-}
 
 struct Foo {
     x: u32,
@@ -218,7 +207,7 @@ fn const_param<const FOO: usize>() -> usize {
     FOO
 }
 
-use ops::Fn;
+use core::ops::Fn;
 fn baz<F: Fn() -> ()>(f: F) {
     f()
 }
@@ -397,7 +386,7 @@ mod __ {
 }
 
 macro_rules! void {
-    ($($tt:tt)*) => {}
+    ($($tt:tt)*) => {discard!($($tt:tt)*)}
 }
 
 struct __ where Self:;
@@ -420,6 +409,31 @@ void!('static 'self 'unsafe)
             false,
         );
     }
+}
+
+#[test]
+fn test_keyword_macro_edition_highlighting() {
+    check_highlighting(
+        r#"
+//- /main.rs crate:main edition:2018 deps:lib2015,lib2024
+lib2015::void_2015!(try async await gen);
+lib2024::void_2024!(try async await gen);
+//- /lib2015.rs crate:lib2015 edition:2015
+#[macro_export]
+macro_rules! void_2015 {
+    ($($tt:tt)*) => {discard!($($tt:tt)*)}
+}
+
+//- /lib2024.rs crate:lib2024 edition:2024
+#[macro_export]
+macro_rules! void_2024 {
+    ($($tt:tt)*) => {discard!($($tt:tt)*)}
+}
+
+"#,
+        expect_file![format!("./test_data/highlight_keywords_macros.html")],
+        false,
+    );
 }
 
 #[test]
@@ -722,6 +736,15 @@ fn test_highlight_doc_comment() {
 //! fn test() {}
 //! ```
 
+//! ```rust
+//! extern crate self;
+//! extern crate std;
+//! extern crate core;
+//! extern crate alloc;
+//! extern crate proc_macro;
+//! extern crate test;
+//! extern crate Krate;
+//! ```
 mod outline_module;
 
 /// ```
@@ -1084,6 +1107,9 @@ pub struct Struct;
     );
 }
 
+// Rainbow highlighting uses a deterministic hash (fxhash) but the hashing does differ
+// depending on the pointer width so only runs this on 64-bit targets.
+#[cfg(target_pointer_width = "64")]
 #[test]
 fn test_rainbow_highlighting() {
     check_highlighting(

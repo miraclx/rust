@@ -292,7 +292,7 @@ v(
 v("release-channel", "rust.channel", "the name of the release channel to build")
 v(
     "release-description",
-    "rust.description",
+    "build.description",
     "optional descriptive string for version output",
 )
 v("dist-compression-formats", None, "List of compression formats to use")
@@ -776,6 +776,6 @@ if __name__ == "__main__":
         f.write(contents)
 
     p("")
-    p("run `python {}/x.py --help`".format(rust_dir))
+    p("run `{} {}/x.py --help`".format(os.path.basename(sys.executable), rust_dir))
     if "GITHUB_ACTIONS" in os.environ:
         print("::endgroup::")

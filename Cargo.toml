@@ -13,7 +13,6 @@ members = [
   "src/tools/clippy/clippy_dev",
   "src/tools/compiletest",
   "src/tools/run-make-support",
-  "src/tools/error_index_generator",
   "src/tools/linkchecker",
   "src/tools/lint-docs",
   "src/tools/miropt-test-tools",
@@ -63,6 +62,20 @@ exclude = [
   # so it can be invoked before the current checkout is set up.
   "src/tools/x",
 ]
+
+# These lints are applied to many crates in the workspace. In practice, this is
+# all crates under `compiler/`.
+#
+# NOTE: rustc-specific lints (e.g. `rustc::internal`) aren't supported by
+# Cargo. (Support for them is possibly blocked by #44690 (attributes for
+# tools).) Those lints are instead specified for `compiler/` crates in
+# `src/bootstrap/src/core/builder/cargo.rs`.
+[workspace.lints.rust]
+# FIXME(edition_2024): Change this to `-Wrust_2024_idioms` when all of the
+# individual lints are satisfied.
+keyword_idents_2024 = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "warn"
 
 [profile.release.package.rustc-rayon-core]
 # The rustc fork of Rayon has deadlock detection code which intermittently
